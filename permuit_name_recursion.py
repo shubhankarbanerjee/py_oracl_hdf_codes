@@ -53,3 +53,4 @@ print (str(num_of_permuitations)+" Permuitations of the name "+name_str+" are :-
 iterate(name_len-1)
 print(str(datetime.datetime.now()))
 print(str(time.time()-t) + "  seconds")
+input("OK?")
