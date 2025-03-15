@@ -1,0 +1,4 @@
+Checking diff between files :./its and ./its
+[Errno 2] No such file or directory: './its'
+[Errno 2] No such file or directory: 'D:\\ITS\\its_tds\\impl\\tds\\config\\b2c-bc\\fmtmpls\\bc-II\\application.ftl'
+
