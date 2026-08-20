@@ -73,6 +73,3 @@ while('0'!=input("Would you like to play tower of Hanoi game? (0 for no):") ):
         
     display_towers()
     move_tower(0,2,1,number_of_disc)
-
-
-        

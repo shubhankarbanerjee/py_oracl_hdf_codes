@@ -1,0 +1,8 @@
+N,M = [int(x) for x in input("y,x such that both are Odd and x=3y").split()]
+for i in range(N):
+    s='-'*M
+    k= 2*i+1 if i<N//2  else 0
+    k= 2*(N-i)-1 if i>N//2 else k
+    s=s[:(M-3*(k))//2] + '.|.'*k +s[M-(M-3*(k))//2:] if k>0 else s
+    s=s[:(M-7)//2] + 'WELCOME' + s[M-(M-7)//2:]  if k==0 else s
+    print(s)
