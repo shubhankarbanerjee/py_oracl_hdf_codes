@@ -1,0 +1,14 @@
+*.log
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.ico
+screenshots/
+.paydir_browser_profile/
+__pycache__/
+*.py[cod]
+*.cookies.json
+*.session.json
