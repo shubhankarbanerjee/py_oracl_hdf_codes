@@ -289,9 +289,21 @@ def populate_imported_profile(driver, fields):
     settle_code = wait.until(
         EC.visibility_of_element_located((By.ID, "SettleCode"))
     )
+    fee_merchant_code = wait.until(
+        EC.visibility_of_element_located((By.ID, "FeeMerchantCode"))
+    )
+    fee_merchant_code_password = wait.until(
+        EC.visibility_of_element_located((By.ID, "FeeMerchantCodePassword"))
+    )
+    fee_settle_code = wait.until(
+        EC.visibility_of_element_located((By.ID, "FeeSettleCode"))
+    )
     replace_element_value(merchant_code, fields["L2GMerchantCode"])
     replace_element_value(merchant_code_password, MERCHANT_CODE_PASSWORD)
     replace_element_value(settle_code, fields["UniqueID"])
+    replace_element_value(fee_merchant_code, "")
+    replace_element_value(fee_merchant_code_password, "")
+    replace_element_value(fee_settle_code, "")
 
     swipe_supported = activate_profile_tab(driver, "pos", "IsSwipeSupported")
     should_support_swipe = fields["UniqueSiteName"].strip().casefold().endswith(" vt")
@@ -305,6 +317,9 @@ def populate_imported_profile(driver, fields):
         "MerchantCode": merchant_code.get_attribute("value"),
         "MerchantCodePassword": merchant_code_password.get_attribute("value"),
         "SettleCode": settle_code.get_attribute("value"),
+        "FeeMerchantCode": fee_merchant_code.get_attribute("value"),
+        "FeeMerchantCodePassword": fee_merchant_code_password.get_attribute("value"),
+        "FeeSettleCode": fee_settle_code.get_attribute("value"),
         "IsSwipeSupported": swipe_supported.is_selected(),
     }
     expected_values = {
@@ -315,6 +330,9 @@ def populate_imported_profile(driver, fields):
         "MerchantCode": fields["L2GMerchantCode"],
         "MerchantCodePassword": MERCHANT_CODE_PASSWORD,
         "SettleCode": fields["UniqueID"],
+        "FeeMerchantCode": "",
+        "FeeMerchantCodePassword": "",
+        "FeeSettleCode": "",
         "IsSwipeSupported": should_support_swipe,
     }
     incorrect_fields = [
