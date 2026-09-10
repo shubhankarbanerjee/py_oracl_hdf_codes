@@ -192,14 +192,44 @@ def open_create_page(driver):
         print("Create Merchant page load timed out; checking whether the form is usable...")
 
 
+def get_browser_context(driver):
+    try:
+        current_url = driver.current_url
+    except Exception:
+        current_url = "(unavailable)"
+    try:
+        page_title = driver.title
+    except Exception:
+        page_title = "(unavailable)"
+    return f"URL={current_url}, title={page_title!r}"
+
+
+def activate_profile_tab(driver, tab_id, visible_element_id):
+    wait = WebDriverWait(driver, 15)
+    tab_link = wait.until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, f"#tabs > ul a[href='#{tab_id}']")
+        )
+    )
+    driver.execute_script("arguments[0].click();", tab_link)
+    return wait.until(
+        EC.visibility_of_element_located((By.ID, visible_element_id))
+    )
+
+
 def wait_for_create_form_after_login(driver):
     open_create_page(driver)
     while True:
         try:
-            return WebDriverWait(driver, 3).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.ID, UPLOAD_INPUT_ID))
             )
+            return activate_profile_tab(driver, "advanced", UPLOAD_INPUT_ID)
         except TimeoutException:
+            print(
+                "Create Merchant import form is not ready. "
+                + get_browser_context(driver)
+            )
             input(
                 "Complete the PayDirect login in the browser, then press Enter "
                 "to check for the Create Merchant form..."
@@ -236,9 +266,7 @@ def set_checkbox_state(driver, checkbox, checked):
 
 def populate_imported_profile(driver, fields):
     wait = WebDriverWait(driver, 30)
-    merchant_name = wait.until(
-        EC.visibility_of_element_located((By.ID, "MerchantName"))
-    )
+    merchant_name = activate_profile_tab(driver, "basics", "MerchantName")
     merchant_site_name = wait.until(
         EC.visibility_of_element_located((By.ID, "MerchantSiteName"))
     )
@@ -248,26 +276,24 @@ def populate_imported_profile(driver, fields):
     default_state = wait.until(
         EC.presence_of_element_located((By.ID, "DefaultState"))
     )
-    merchant_code = wait.until(
-        EC.presence_of_element_located((By.ID, "MerchantCode"))
-    )
-    merchant_code_password = wait.until(
-        EC.presence_of_element_located((By.ID, "MerchantCodePassword"))
-    )
-    settle_code = wait.until(
-        EC.presence_of_element_located((By.ID, "SettleCode"))
-    )
-    swipe_supported = wait.until(
-        EC.presence_of_element_located((By.ID, "IsSwipeSupported"))
-    )
 
     replace_element_value(merchant_name, fields["UniqueSiteName"])
     replace_element_value(merchant_site_name, fields["SiteNameGiven"])
     replace_element_value(trusted_domains, TRUSTED_DOMAINS)
     Select(default_state).select_by_value(fields["State"])
+
+    merchant_code = activate_profile_tab(driver, "transaction", "MerchantCode")
+    merchant_code_password = wait.until(
+        EC.visibility_of_element_located((By.ID, "MerchantCodePassword"))
+    )
+    settle_code = wait.until(
+        EC.visibility_of_element_located((By.ID, "SettleCode"))
+    )
     replace_element_value(merchant_code, fields["L2GMerchantCode"])
     replace_element_value(merchant_code_password, MERCHANT_CODE_PASSWORD)
     replace_element_value(settle_code, fields["UniqueID"])
+
+    swipe_supported = activate_profile_tab(driver, "pos", "IsSwipeSupported")
     should_support_swipe = fields["UniqueSiteName"].strip().casefold().endswith(" vt")
     set_checkbox_state(driver, swipe_supported, should_support_swipe)
 
@@ -301,6 +327,7 @@ def populate_imported_profile(driver, fields):
             "Imported form value verification failed for: "
             + ", ".join(incorrect_fields)
         )
+    activate_profile_tab(driver, "basics", "MerchantName")
 
 
 def display_input_summary(fields, other_lines, template_path):
@@ -365,7 +392,9 @@ def main():
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"\nError: {exc}")
     except Exception as exc:
-        print(f"\nUnexpected error: {exc}")
+        print(f"\nUnexpected error ({type(exc).__name__}): {exc!r}")
+        if driver:
+            print("Browser context: " + get_browser_context(driver))
     finally:
         if driver:
             driver.quit()
