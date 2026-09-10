@@ -29,7 +29,7 @@ def validate_number(number):
     zeroes = binary_str.count('0')
     # Check if there are exactly 3 ones and 3 zeroes
     # Also check if the 1s are not consucutive
-    return ones == 3 and zeroes == 3 and not ('111' in binary_str)
+    return ones == 3 and zeroes == 3 and not ('111' in binary_str) and not ('000' in binary_str)
 
 #Create a Validate_Tango function to check whether 
 # each number when translated to binary, has 3 ones and 3 zeroes or not
@@ -47,10 +47,10 @@ def validate_tango(numbers):
             break
      # Column wise checking
     for bit_position in range(6):
-        # Check if three 1s are not consucutive in a column
+        # Check if three numbers are not consucutive in a column
         for i in range(4):
             valid = valid and not (get_bit(numbers[i], bit_position)==get_bit(numbers[i+1], bit_position)
-                                      ==get_bit(numbers[i+2], bit_position)==1)
+                                      ==get_bit(numbers[i+2], bit_position))
     # Row wise checking now
     for number in numbers:
         valid = valid and validate_number(number)
@@ -159,6 +159,9 @@ class TangoSolverGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Tango Solver GUI")
+        self.clear_grid() # Initialize the grid with default values
+
+    def clear_grid(self):
         self.numbers = [11, 13, 19, 21, 22, 25] # Example list of numbers
         self.set_string = []
         self.set_sign_x = []
@@ -174,24 +177,24 @@ class TangoSolverGUI:
         for i in range(11):
             for j in range(11):
                 if i % 2 == 0 and j % 2 == 0:
-                    button = tk.Button(self.root, text=self.grid[i][j], command=lambda i=i, j=j: self.toggle10(i, j))
+                    button = tk.Button(self.root, background="#FFFFFF", text=self.grid[i][j], command=lambda i=i, j=j: self.toggle10(i, j))
                 elif i % 2 == 0 or j % 2 == 0:
-                    button = tk.Button(self.root, text=self.grid[i][j], command=lambda i=i, j=j: self.toggle_sign(i, j))
+                    button = tk.Button(self.root, background="#0FFF00", text=self.grid[i][j], command=lambda i=i, j=j: self.toggle_sign(i, j))
                 else:
                     button = tk.Label(self.root, text="X")
-                button.grid(row=i+1, column=j, padx=5, pady=5)
+                button.grid(row=i+1, column=j, padx=2, pady=1)
 
         self.solve_button = tk.Button(self.root, text="Solve", command=self.solve)
-        self.solve_button.grid(row=12, column=0, columnspan=11)
+        self.solve_button.grid(row=12, column=0, columnspan=5)
+        self.clear_button = tk.Button(self.root, text="Clear", command=self.clear_grid)
+        self.clear_button.grid(row=12, column=6, columnspan=5)
         #now display the full list grid in the text box, which will get refreshed with the above grid.
         self.result_text = tk.Text(self.root, height=20, width=50)
         self.result_text.grid(row=1, column=12, rowspan=11)
         #this is the grid that will be displayed in the text box
-        for i in range(11):
-            for j in range(11):
-                self.result_text.insert(tk.END, self.grid[i][j] + " ")
-        #for row in self.grid:
-        #    self.result_text.insert(tk.END, ''.join(row) + '\n')
+        for row in self.grid:
+            self.result_text.insert(tk.END, ' '.join(row) + '\n')
+        self.solveGrid()
   
   #      self.result_text = tk.Text(self.root, height=20, width=50)
   #      self.result_text.grid(row=13, column=0, columnspan=11)
@@ -263,24 +266,27 @@ class TangoSolverGUI:
 
     def solve(self):
         self.solveGrid()
-        self.result_text.delete(1.0, tk.END)
         solve_thread = threading.Thread(target=self.solve_tango)
+        self.count = 0
         solve_thread.start()
 
     def solve_tango(self):
-        count = 0
         for combination in product(self.valid_numbers, repeat=6):
-            numbers = list(combination)
-            if numbers != num_set_string(self.set_string, numbers) or numbers != num_set_sign_x(self.set_sign_x, numbers) or numbers != num_set_sign_y(self.set_sign_y, numbers):
+            self.numbers = list(combination)
+            if self.numbers != num_set_string(self.set_string, self.numbers) or self.numbers != num_set_sign_x(self.set_sign_x, self.numbers) or self.numbers != num_set_sign_y(self.set_sign_y, self.numbers):
                 continue
-            if validate_tango(numbers):
-                count += 1
-                self.result_text.insert(tk.END, f"Solution {count}:\n")
-                self.result_text.insert(tk.END, f"Numbers: {numbers}\n")
-                self.result_text.insert(tk.END, "Tango:\n")
-                print_tango(numbers)
-                self.print_tango_GUI(numbers)
-                if count == 3:
+            if validate_tango(self.numbers):
+                self.count += 1
+                result_window = tk.Toplevel(self.root)
+                result_window.title(f"Solution {self.count}")
+                result_text = tk.Text(result_window, height=20, width=50)
+                result_text.pack()
+                result_text.insert(tk.END, f"Solution {self.count}:\n")
+                result_text.insert(tk.END, f"Numbers: {self.numbers}\n")
+                result_text.insert(tk.END, "Tango:\n")
+                for i in range(len(self.numbers)):
+                    result_text.insert(tk.END, f"{print_binary_with_spaces(self.numbers[i])} -|-{i}\n")
+                if self.count == 3:
                     break
 
 if __name__ == "__main__":

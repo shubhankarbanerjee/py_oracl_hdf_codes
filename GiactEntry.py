@@ -78,6 +78,13 @@ def parse_data_paragraph(paragraph):
     if not paragraph or not paragraph.strip():
         return None
     
+    def normalize_key(key):
+        normalized = key.strip()
+        lowered = normalized.lower()
+        if lowered in {'zip', 'zipcode', 'entity.address.zipcode'}:
+            return 'ZipCode'
+        return normalized
+    
     form_data = {}
     lines = paragraph.strip().split('\n')
     
@@ -85,7 +92,8 @@ def parse_data_paragraph(paragraph):
         line = line.strip()
         if '=' in line and line:
             key, value = line.split('=', 1)
-            form_data[key.strip()] = value.strip()
+            normalized_key = normalize_key(key)
+            form_data[normalized_key] = value.strip()
     
     if not form_data:
         return None

@@ -49,9 +49,11 @@ def prompt_yes_no(prompt, default=False):
         print("Please answer y or n.")
 
 
-def collect_profile_input():
+def collect_profile_input(allow_blank_exit=False):
     print("\nPaste the profile details below.")
     print("Press Enter on two consecutive blank lines when finished.\n")
+    if allow_blank_exit:
+        print("Press Enter on the first line to finish and close the browser.\n")
 
     lines = []
     blank_line_count = 0
@@ -59,6 +61,8 @@ def collect_profile_input():
         line = input()
         if not line.strip():
             if not lines:
+                if allow_blank_exit:
+                    return None
                 print("At least one input line is required.")
                 continue
             blank_line_count += 1
@@ -181,8 +185,15 @@ def initialize_driver(browser_type):
     return driver
 
 
+def open_create_page(driver):
+    try:
+        driver.get(CREATE_MERCHANT_URL)
+    except TimeoutException:
+        print("Create Merchant page load timed out; checking whether the form is usable...")
+
+
 def wait_for_create_form_after_login(driver):
-    driver.get(CREATE_MERCHANT_URL)
+    open_create_page(driver)
     while True:
         try:
             return WebDriverWait(driver, 3).until(
@@ -193,7 +204,7 @@ def wait_for_create_form_after_login(driver):
                 "Complete the PayDirect login in the browser, then press Enter "
                 "to check for the Create Merchant form..."
             )
-            driver.get(CREATE_MERCHANT_URL)
+            open_create_page(driver)
 
 
 def upload_template(driver, template_path):
@@ -301,26 +312,56 @@ def display_input_summary(fields, other_lines, template_path):
     print(f"\nSelected XML template: {template_path}")
 
 
+def prepare_profile_input(lines):
+    fields, other_lines = parse_profile_lines(lines)
+    fields = resolve_open_items(fields)
+    validate_profile_fields(fields)
+
+    template_path = select_template(fields["UniqueSiteName"])
+    if not template_path.is_file():
+        raise FileNotFoundError(f"XML template was not found: {template_path}")
+    display_input_summary(fields, other_lines, template_path)
+    return fields, template_path
+
+
+def collect_prepared_profile(allow_blank_exit=False):
+    while True:
+        lines = collect_profile_input(allow_blank_exit=allow_blank_exit)
+        if lines is None:
+            return None
+        try:
+            return prepare_profile_input(lines)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"\nError: {exc}")
+            print("Please enter the profile again.")
+
+
+def process_profile(driver, fields, template_path):
+    upload_template(driver, template_path)
+    populate_imported_profile(driver, fields)
+    print("\nXML uploaded and required merchant fields populated successfully.")
+    input(
+        "Save and test the site in the browser. "
+        "Press Enter here only after both are complete..."
+    )
+
+
 def main():
     driver = None
     try:
-        lines = collect_profile_input()
-        fields, other_lines = parse_profile_lines(lines)
-        fields = resolve_open_items(fields)
-        validate_profile_fields(fields)
-
-        template_path = select_template(fields["UniqueSiteName"])
-        if not template_path.is_file():
-            raise FileNotFoundError(f"XML template was not found: {template_path}")
-        display_input_summary(fields, other_lines, template_path)
+        fields, template_path = collect_prepared_profile()
 
         browser_type = get_browser_choice()
         print(f"\nOpening PayDirect Create Merchant page in {browser_type.title()}...")
         driver = initialize_driver(browser_type)
-        upload_template(driver, template_path)
-        populate_imported_profile(driver, fields)
-        print("\nXML uploaded and required merchant fields populated successfully.")
-        input("Review the form in the browser, then press Enter to close it...")
+        while True:
+            process_profile(driver, fields, template_path)
+
+            next_profile = collect_prepared_profile(allow_blank_exit=True)
+            if next_profile is None:
+                print("\nNo additional profile entered. Closing the browser.")
+                break
+            fields, template_path = next_profile
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"\nError: {exc}")
     except Exception as exc:

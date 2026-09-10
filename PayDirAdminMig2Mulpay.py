@@ -1,5 +1,6 @@
 import builtins
 import base64
+import csv
 from datetime import datetime
 from io import BytesIO
 import json
@@ -19,11 +20,35 @@ import time
 from urllib.parse import urljoin
 
 MULTIPAY_URL = "https://app.multipayadmin.cus.prod.comm.fisfedcloud.com/"
+MULTIPAY_MERCHANTS_URL = urljoin(MULTIPAY_URL, "multipay-web-admin/merchants")
 PAYDIRECT_URL = "http://p5zlgintc01:16020/PayDirect/"
+PAYDIRECT_DEFAULT_RETURN_URL = "https://wipp.edmundsassoc.com"
 LOG_FILE_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.log")
+CSS_BACKUP_LOG_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.SiteCssBackup.log")
+SWIPE_BACKUP_LOG_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.SwipeBackup.log")
 SESSION_CONTEXT_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.session.json")
 COOKIE_STORE_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.cookies.json")
 SCREENSHOTS_DIR = Path(__file__).with_name("screenshots")
+BATCH_SIZE = 50
+RUN_ISSUES = []
+PAYDIRECT_PROFILE_CACHE = {}
+PAYDIRECT_PROFILE_CACHE_LOADED = False
+STATUS_ROWS = {}
+STATUS_CSV_PATH = None
+STATUS_CSV_COLUMNS = [
+    "SITE_NAME",
+    "Swipe_Checkbox?",
+    "Imported count",
+    "Screenshot name",
+    "LOGO Replaced",
+    "CSS saved",
+    "Redirect done",
+    "Undo Swipe",
+    "Undo CSS",
+    "Undo Redirect",
+    "PD_Site_URL",
+    "Merchant Code",
+]
 PAYDIRECT_CSS_TEXT = """#submitButton allowAutoDisable{ color: red; } input.submitButton {color: red !important; } #SubmitButton { color: red !important; }
 
  .multipay-font {
@@ -105,8 +130,7 @@ PAYDIRECT_CSS_TEXT = """#submitButton allowAutoDisable{ color: red; } input.subm
 
         .multipay-checkbox-label {
           background-color: #ffffff;
-        }
-         """
+        }  """
 
 
 def get_log_status(message):
@@ -176,6 +200,113 @@ def prompt_yes_no(prompt, default=False):
         if value in {"n", "no"}:
             return False
         print("✗ Please answer with y or n.")
+
+
+def record_run_issue(site_name, step_label, message):
+    """Record a site-level issue for end-of-run reporting."""
+    RUN_ISSUES.append(
+        {
+            "site": site_name,
+            "step": step_label,
+            "message": str(message),
+        }
+    )
+    mark_status_error_for_step(site_name, step_label)
+
+
+def get_status_row(site_name):
+    """Return the per-site status row, creating it when needed."""
+    if site_name not in STATUS_ROWS:
+        STATUS_ROWS[site_name] = {column: "NA" for column in STATUS_CSV_COLUMNS}
+        STATUS_ROWS[site_name]["SITE_NAME"] = site_name
+    return STATUS_ROWS[site_name]
+
+
+def initialize_status_rows(site_list):
+    """Ensure all requested sites appear in the final status CSV."""
+    for site_name in site_list:
+        get_status_row(site_name)
+
+
+def update_site_status(site_name, **updates):
+    """Update one or more final CSV status values for a site."""
+    status_row = get_status_row(site_name)
+    for key, value in updates.items():
+        status_row[key] = value
+
+
+def mark_status_error_for_step(site_name, step_label):
+    """Mark final CSV status columns as Error for failed workflow steps."""
+    step_text = str(step_label)
+    step_to_column = {
+        "Step 2": "LOGO Replaced",
+        "Step 3": "CSS saved",
+        "Step 4": "Redirect done",
+        "Step 5": "Swipe_Checkbox?",
+        "Step 6": "CSS saved",
+        "Step 7": "Undo CSS",
+        "Step 8": "Undo Swipe",
+        "Step 9": "Undo Redirect",
+    }
+    updates = {}
+    for step_name, column_name in step_to_column.items():
+        if step_name in step_text:
+            updates[column_name] = "Error"
+    if updates:
+        update_site_status(site_name, **updates)
+
+
+def get_status_csv_path():
+    """Return the single status CSV path for this run."""
+    global STATUS_CSV_PATH
+
+    if STATUS_CSV_PATH is None:
+        STATUS_CSV_PATH = Path(__file__).with_name(
+            f"PayDirAdminMig2Mulpay_status_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+    return STATUS_CSV_PATH
+
+
+def write_status_csv(reason="update"):
+    """Write the current per-site run status CSV."""
+    if not STATUS_ROWS:
+        print("  No site status rows to write.")
+        return None
+
+    status_csv_path = get_status_csv_path()
+    with status_csv_path.open("w", newline="", encoding="utf-8-sig") as status_file:
+        writer = csv.DictWriter(status_file, fieldnames=STATUS_CSV_COLUMNS)
+        writer.writeheader()
+        for status_row in STATUS_ROWS.values():
+            writer.writerow(status_row)
+
+    print(f"✓ Status CSV {reason}: {status_csv_path}")
+    return status_csv_path
+
+
+def display_run_issues():
+    """Print all incomplete/error sites collected during this run."""
+    if not RUN_ISSUES:
+        print("\n✓ No incomplete/error sites recorded during this execution.")
+        return
+
+    print("\n" + "=" * 60)
+    print("INCOMPLETE / ERROR SITES")
+    print("=" * 60)
+    for index, issue in enumerate(RUN_ISSUES, start=1):
+        print(
+            f"{index}. Site: {issue['site']} | "
+            f"Step: {issue['step']} | Issue: {issue['message']}"
+        )
+    print("=" * 60)
+
+
+def get_site_preview(site_list, max_items=20):
+    """Return a compact preview string for large site lists."""
+    if len(site_list) <= max_items:
+        return ", ".join(site_list)
+    preview = ", ".join(site_list[:max_items])
+    return f"{preview}, ... ({len(site_list) - max_items} more)"
 
 
 def get_browser_choice():
@@ -470,6 +601,45 @@ def ensure_site_window(driver, handles, site_key, site_url, allow_reopen=True):
         return False
 
 
+def open_fresh_site_window(driver, handles, site_key, site_url):
+    """Open a fresh tab for a site and close the previous site tab when possible."""
+    old_handle = handles.get(site_key)
+
+    try:
+        current_handles = driver.window_handles
+    except Exception as exc:
+        print(f"✗ Unable to read browser windows for fresh {site_key} open: {exc}")
+        return False
+
+    if not current_handles:
+        print(f"✗ Cannot open fresh {site_key} tab because all browser windows are closed.")
+        return False
+
+    anchor_handle = next((handle for handle in current_handles if handle != old_handle), current_handles[0])
+
+    try:
+        driver.switch_to.window(anchor_handle)
+        driver.switch_to.new_window("tab")
+        driver.get(site_url)
+        new_handle = driver.current_window_handle
+        handles[site_key] = new_handle
+        print(f"✓ Opened fresh {site_key} tab: {site_url}")
+
+        if old_handle and old_handle in current_handles and old_handle != new_handle:
+            try:
+                driver.switch_to.window(old_handle)
+                driver.close()
+                print(f"✓ Closed previous {site_key} tab")
+            except Exception as exc:
+                print(f"  Previous {site_key} tab could not be closed: {exc}")
+
+        driver.switch_to.window(new_handle)
+        return True
+    except Exception as exc:
+        print(f"✗ Failed to open fresh {site_key} tab: {exc}")
+        return False
+
+
 def parse_site_list(site_text):
     """Parse site names separated by commas, spaces, or line breaks."""
     if not site_text or not site_text.strip():
@@ -520,7 +690,7 @@ def get_site_list_from_paragraph():
 
 def get_selected_steps(default_steps="12345"):
     """Prompt for steps to run and return steps in the requested order."""
-    valid_steps = {"1", "2", "3", "4", "5"}
+    valid_steps = {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
     print("\n" + "=" * 60)
     print("STEP SELECTION")
     print("=" * 60)
@@ -529,10 +699,14 @@ def get_selected_steps(default_steps="12345"):
     print("Step 3: Update CSS in Paydirect Admin")
     print("Step 4: Switch On redirect flag in Paydirect Admin")
     print("Step 5: Unsupport Swipe in Paydirect Admin")
+    print("Step 6: Append CSS in Paydirect Admin")
+    print("Step 7: Reverse CSS change from Paydirect backup log")
+    print("Step 8: Reverse Swipe checkbox from Paydirect backup log")
+    print("Step 9: Uncheck redirect flag in Paydirect Admin")
     print("=" * 60)
     print("Choose which steps to run.")
     print("Default: 12345 (run all steps in this order)")
-    print("Examples: 13, 35124, 2, 245")
+    print("Examples: 13, 53124, 789, 573124, 2")
     print("=" * 60)
 
     while True:
@@ -549,7 +723,7 @@ def get_selected_steps(default_steps="12345"):
             print(f"✓ Steps selected: {''.join(selected_steps)}")
             return selected_steps
 
-        print("✗ Invalid step selection. Please enter only digits 1, 2, 3, 4, 5.")
+        print("✗ Invalid step selection. Please enter only digits 1 through 9.")
 
 
 def get_followup_steps():
@@ -560,7 +734,7 @@ def get_followup_steps():
     if not value:
         return []
 
-    valid_steps = {"1", "2", "3", "4", "5"}
+    valid_steps = {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
     selected_steps = []
     for ch in value:
         if ch in valid_steps and ch not in selected_steps:
@@ -628,8 +802,11 @@ def save_site_screenshot(driver, site_name, phase):
     screenshot_path = SCREENSHOTS_DIR / screenshot_name
     if driver.save_screenshot(str(screenshot_path)):
         print(f"✓ Screenshot saved: {screenshot_path}")
+        update_site_status(site_name, **{"Screenshot name": screenshot_name})
+        return screenshot_name
     else:
         print(f"✗ Failed to save screenshot: {screenshot_path}")
+        return None
 
 
 def click_visible_button_by_id(driver, button_id):
@@ -789,6 +966,59 @@ def wait_for_paydirect_profiles_table(driver):
     return WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "Profiles")))
 
 
+def get_matching_column_index(headers, required_words):
+    """Return the first header index containing all required words."""
+    for index, header in enumerate(headers):
+        normalized_header = re.sub(r"[^a-z0-9]+", "", header.lower())
+        if all(word in normalized_header for word in required_words):
+            return index
+    return None
+
+
+def load_paydirect_profile_cache(driver):
+    """Cache PayDirect profile table values used by later site edits."""
+    global PAYDIRECT_PROFILE_CACHE_LOADED
+
+    if PAYDIRECT_PROFILE_CACHE_LOADED:
+        return
+
+    print("▶ Loading PayDirect profile table cache...")
+    driver.get(PAYDIRECT_URL)
+    table = wait_for_paydirect_profiles_table(driver)
+    header_cells = table.find_elements(By.CSS_SELECTOR, "thead th")
+    if not header_cells:
+        header_cells = table.find_elements(By.XPATH, ".//tr[th][1]/th")
+    headers = [cell.text.strip() for cell in header_cells]
+    site_index = get_matching_column_index(headers, ["site", "name"])
+    merchant_index = get_matching_column_index(headers, ["merchant", "code"])
+
+    rows = table.find_elements(By.XPATH, ".//tr[td]")
+    for row in rows:
+        cells = row.find_elements(By.TAG_NAME, "td")
+        if len(cells) < 3:
+            continue
+
+        resolved_site_index = site_index if site_index is not None and site_index < len(cells) else 2
+        resolved_merchant_index = merchant_index if merchant_index is not None and merchant_index < len(cells) else 1
+        site_name = cells[resolved_site_index].text.strip()
+        if not site_name:
+            continue
+
+        try:
+            edit_url = get_paydirect_edit_url_from_row(row)
+        except Exception:
+            edit_url = ""
+
+        PAYDIRECT_PROFILE_CACHE[site_name.strip().lower()] = {
+            "site_name": site_name,
+            "merchant_code": cells[resolved_merchant_index].text.strip() if resolved_merchant_index < len(cells) else "",
+            "edit_url": edit_url,
+        }
+
+    PAYDIRECT_PROFILE_CACHE_LOADED = True
+    print(f"✓ PayDirect profile cache loaded: {len(PAYDIRECT_PROFILE_CACHE)} row(s)")
+
+
 def find_paydirect_profile_row(driver, site_name):
     """Find the PayDirect profile row whose Merchant Site Name matches site_name."""
     wait_for_paydirect_profiles_table(driver)
@@ -815,11 +1045,27 @@ def get_paydirect_edit_url_from_row(row):
 
 def open_paydirect_edit_page_for_site(driver, site_name):
     """Open the PayDirect edit page for one site by resolving it from the profile table."""
-    print(f"▶ Searching PayDirect profile list for site: {site_name}")
-    driver.get(PAYDIRECT_URL)
-    row = find_paydirect_profile_row(driver, site_name)
-    log_paydirect_profile_row(row, site_name)
-    edit_url = get_paydirect_edit_url_from_row(row)
+    load_paydirect_profile_cache(driver)
+    profile = PAYDIRECT_PROFILE_CACHE.get(site_name.strip().lower())
+    if profile and profile.get("edit_url"):
+        edit_url = profile["edit_url"]
+        update_site_status(
+            site_name,
+            **{
+                "PD_Site_URL": edit_url,
+                "Merchant Code": profile.get("merchant_code") or "NA",
+            },
+        )
+        print(f"✓ PayDirect cached row for {site_name}: {profile.get('merchant_code') or '(no merchant code)'} | {edit_url}")
+    else:
+        print(f"▶ Searching PayDirect profile list for site: {site_name}")
+        driver.get(PAYDIRECT_URL)
+        row = find_paydirect_profile_row(driver, site_name)
+        log_paydirect_profile_row(row, site_name)
+        edit_url = get_paydirect_edit_url_from_row(row)
+        cells = row.find_elements(By.TAG_NAME, "td")
+        merchant_code = cells[1].text.strip() if len(cells) > 1 else "NA"
+        update_site_status(site_name, **{"PD_Site_URL": edit_url, "Merchant Code": merchant_code})
     print(f"▶ Opening PayDirect edit page: {edit_url}")
     driver.get(edit_url)
     WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "editForm")))
@@ -857,9 +1103,147 @@ def open_paydirect_pos_tab(driver):
     print("✓ POS tab opened")
 
 
-def set_paydirect_css_text(driver, css_text):
-    """Replace the standard PayDirect CSS textarea value."""
+def log_existing_paydirect_css(driver, css_field, site_name=None):
+    """Append the existing PayDirect CSS textarea content before updating."""
+    existing_css = css_field.get_attribute("value") or ""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    site_label = site_name or "(unknown site)"
+
+    try:
+        current_url = driver.current_url
+    except Exception:
+        current_url = "(unavailable)"
+
+    backup_entry = (
+        "\n"
+        + "=" * 80
+        + f"\nSaved at: {timestamp}\n"
+        + f"Site: {site_label}\n"
+        + f"URL: {current_url}\n"
+        + "Existing SiteCss content:\n"
+        + existing_css
+        + "\n"
+    )
+    with CSS_BACKUP_LOG_PATH.open("a", encoding="utf-8") as backup_file:
+        backup_file.write(backup_entry)
+
+    print(f"✓ Existing PayDirect SiteCss backed up for {site_label}: {CSS_BACKUP_LOG_PATH}")
+    print(f"Existing PayDirect SiteCss content for {site_label}:")
+    if existing_css.strip():
+        print(existing_css)
+    else:
+        print("(empty)")
+
+
+def get_latest_paydirect_css_backup(site_name):
+    """Return the most recent logged SiteCss backup for one site."""
+    if not CSS_BACKUP_LOG_PATH.exists():
+        raise RuntimeError(f"CSS backup log not found: {CSS_BACKUP_LOG_PATH}")
+
+    log_text = CSS_BACKUP_LOG_PATH.read_text(encoding="utf-8")
+    matching_css_values = []
+    for block in log_text.split("=" * 80):
+        if f"Site: {site_name}" not in block:
+            continue
+        marker = "Existing SiteCss content:\n"
+        if marker not in block:
+            continue
+        matching_css_values.append(block.split(marker, 1)[1].rstrip("\n"))
+
+    if not matching_css_values:
+        raise RuntimeError(f"No CSS backup found for {site_name} in {CSS_BACKUP_LOG_PATH}")
+
+    return matching_css_values[-1]
+
+
+def restore_paydirect_css_from_backup(driver, site_name):
+    """Restore SiteCss from the latest backup log entry for the site."""
+    backup_css = get_latest_paydirect_css_backup(site_name)
     css_field = WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "SiteCss")))
+    driver.execute_script(
+        """
+        const field = arguments[0];
+        field.value = arguments[1];
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        css_field,
+        backup_css,
+    )
+    print(f"✓ PayDirect SiteCss restored from backup log for {site_name}")
+
+
+def log_paydirect_swipe_status(site_name, was_checked):
+    """Append the previous swipe checkbox state before Step 5 changes it."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    backup_entry = (
+        "\n"
+        + "=" * 80
+        + f"\nSaved at: {timestamp}\n"
+        + f"Site: {site_name}\n"
+        + f"IsSwipeSupported: {'checked' if was_checked else 'unchecked'}\n"
+    )
+    with SWIPE_BACKUP_LOG_PATH.open("a", encoding="utf-8") as backup_file:
+        backup_file.write(backup_entry)
+    print(
+        f"✓ Previous swipe support state backed up for {site_name}: "
+        f"{'checked' if was_checked else 'unchecked'}"
+    )
+
+
+def get_paydirect_swipe_status(driver):
+    """Return the current PayDirect swipe support checkbox state."""
+    open_paydirect_pos_tab(driver)
+    swipe_supported = WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.ID, "IsSwipeSupported"))
+    )
+    return swipe_supported.is_selected()
+
+
+def update_paydirect_swipe_status_result(site_name, initial_swipe_checked, final_swipe_checked):
+    """Update final CSV swipe status from before/after checkbox state."""
+    current_status = get_status_row(site_name).get("Swipe_Checkbox?")
+    if initial_swipe_checked and not final_swipe_checked:
+        update_site_status(site_name, **{"Swipe_Checkbox?": "Done"})
+        print(f"✓ Swipe status changed to unchecked for {site_name}; status set to Done")
+    elif not initial_swipe_checked and not final_swipe_checked:
+        if current_status == "Done":
+            print(f"✓ Swipe status already marked Done for {site_name}; keeping Done")
+            return
+        update_site_status(site_name, **{"Swipe_Checkbox?": "UNCH"})
+        print(f"✓ Swipe was already unchecked for {site_name}; status set to UNCH")
+    else:
+        print(
+            f"  Swipe status for {site_name}: "
+            f"initial={'checked' if initial_swipe_checked else 'unchecked'}, "
+            f"final={'checked' if final_swipe_checked else 'unchecked'}"
+        )
+
+
+def get_latest_paydirect_swipe_backup(site_name):
+    """Return the most recent logged swipe checkbox state for one site."""
+    if not SWIPE_BACKUP_LOG_PATH.exists():
+        raise RuntimeError(f"Swipe backup log not found: {SWIPE_BACKUP_LOG_PATH}")
+
+    log_text = SWIPE_BACKUP_LOG_PATH.read_text(encoding="utf-8")
+    matching_values = []
+    for block in log_text.split("=" * 80):
+        if f"Site: {site_name}" not in block:
+            continue
+        match = re.search(r"^IsSwipeSupported:\s*(checked|unchecked)\s*$", block, flags=re.MULTILINE)
+        if match:
+            matching_values.append(match.group(1) == "checked")
+
+    if not matching_values:
+        raise RuntimeError(f"No swipe backup found for {site_name} in {SWIPE_BACKUP_LOG_PATH}")
+
+    return matching_values[-1]
+
+
+def set_paydirect_css_text(driver, css_text, site_name=None):
+    """Replace the standard PayDirect CSS textarea value after backing it up."""
+    css_field = WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "SiteCss")))
+    log_existing_paydirect_css(driver, css_field, site_name=site_name)
     driver.execute_script(
         """
         const field = arguments[0];
@@ -871,6 +1255,72 @@ def set_paydirect_css_text(driver, css_text):
         css_text,
     )
     print("✓ PayDirect SiteCss text updated")
+
+
+def append_paydirect_css_text(driver, css_text, site_name=None):
+    """Append the standard PayDirect CSS textarea value once after backing it up."""
+    css_field = WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "SiteCss")))
+    log_existing_paydirect_css(driver, css_field, site_name=site_name)
+    existing_css = css_field.get_attribute("value") or ""
+    css_to_append = css_text.strip()
+
+    if css_to_append in existing_css:
+        print(f"✓ PayDirect SiteCss already contains standard CSS for {site_name}; append skipped")
+        return False
+
+    if existing_css.strip():
+        updated_css = existing_css.rstrip() + "\n\n" + css_to_append
+    else:
+        updated_css = css_to_append
+
+    driver.execute_script(
+        """
+        const field = arguments[0];
+        field.value = arguments[1];
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        css_field,
+        updated_css,
+    )
+    print("✓ PayDirect SiteCss text appended")
+    return True
+
+
+def set_empty_paydirect_url_field(driver, field_id, default_value):
+    """Set a PayDirect URL input only when its current value is blank."""
+    field = WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, field_id)))
+    existing_value = (field.get_attribute("value") or "").strip()
+    if existing_value:
+        print(f"✓ PayDirect {field_id} already populated")
+        return False
+
+    driver.execute_script(
+        """
+        const field = arguments[0];
+        field.value = arguments[1];
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        field,
+        default_value,
+    )
+    print(f"✓ PayDirect {field_id} populated with default URL")
+    return True
+
+
+def ensure_paydirect_return_urls(driver, site_name):
+    """Populate required PayDirect return/cancel URLs when blank, then save changes."""
+    print(f"▶ Checking PayDirect return URLs for {site_name}...")
+    changed = False
+    changed |= set_empty_paydirect_url_field(driver, "ReturnUrl", PAYDIRECT_DEFAULT_RETURN_URL)
+    changed |= set_empty_paydirect_url_field(driver, "CancelUrl", PAYDIRECT_DEFAULT_RETURN_URL)
+
+    if not changed:
+        print(f"✓ PayDirect return URLs already set for {site_name}")
+        return True
+
+    return click_paydirect_save_button(driver, site_name, "return/cancel URL defaults")
 
 
 def set_checkbox_checked(driver, checkbox_id, checked=True):
@@ -932,16 +1382,33 @@ def is_merchants_menu_visible(driver):
 
 def open_multipay_merchants_page(driver):
     """Navigate to the MultiPay Web Merchants page."""
+    print(f"▶ Opening Merchants page directly: {MULTIPAY_MERCHANTS_URL}")
+    driver.get(MULTIPAY_MERCHANTS_URL)
+    try:
+        wait_for_clickable(driver, By.ID, "searchMerchants", timeout=20)
+        print("✓ Merchants page loaded")
+        return
+    except TimeoutException:
+        print("  Direct Merchants page load did not show search; trying menu navigation")
+
     print("▶ Opening MultiPay Web menu...")
     if not is_merchants_menu_visible(driver):
         multipay_web_button = wait_for_clickable(driver, By.ID, "navMultiPayWeb")
-        multipay_web_button.click()
+        try:
+            multipay_web_button.click()
+        except ElementClickInterceptedException:
+            wait_for_backdrop_to_clear(driver, timeout=8)
+            driver.execute_script("arguments[0].click();", multipay_web_button)
         WebDriverWait(driver, 10).until(lambda current_driver: is_merchants_menu_visible(current_driver))
     print("✓ MultiPay Web menu expanded")
 
     print("▶ Opening Merchants page...")
     merchants_button = wait_for_clickable(driver, By.ID, "navMultiPayWebMerchants")
-    merchants_button.click()
+    try:
+        merchants_button.click()
+    except ElementClickInterceptedException:
+        wait_for_backdrop_to_clear(driver, timeout=8)
+        driver.execute_script("arguments[0].click();", merchants_button)
     wait_for_clickable(driver, By.ID, "searchMerchants")
     print("✓ Merchants page loaded")
 
@@ -1258,11 +1725,11 @@ def attempt_step1_import_with_fallbacks(driver):
     return False
 
 
-def import_profile_in_multipay(driver, handles, site_list):
+def import_profile_in_multipay(driver, handles, site_list, is_final_batch=False):
     """Step 1: import the profile in MultiPay Admin."""
     print("\n▶ Step 1: Import profile in MultiPay Admin...")
-    if not ensure_site_window(driver, handles, "multipay", MULTIPAY_URL, allow_reopen=True):
-        raise RuntimeError("MultiPay window is not available and could not be recovered.")
+    if not open_fresh_site_window(driver, handles, "multipay", MULTIPAY_MERCHANTS_URL):
+        raise RuntimeError("A fresh MultiPay merchants tab could not be opened.")
 
     print(f"  Sites queued for import: {', '.join(site_list)}")
     open_multipay_merchants_page(driver)
@@ -1305,6 +1772,9 @@ def import_profile_in_multipay(driver, handles, site_list):
 
         selected_for_site = select_all_visible_unchecked_checkboxes(driver)
         total_selected += selected_for_site
+        update_site_status(site_name, **{"Imported count": selected_for_site})
+        if selected_for_site == 0:
+            record_run_issue(site_name, "Step 1", "No import checkbox selected")
         print(f"✓ Step 1 site result - {site_name}: {selected_for_site} checkbox(es) checked")
 
     screenshot_name = datetime.now().strftime("Step1_ImportSites_%Y%m%d_%H%M%S.png")
@@ -1312,6 +1782,8 @@ def import_profile_in_multipay(driver, handles, site_list):
     screenshot_path = SCREENSHOTS_DIR / screenshot_name
     if driver.save_screenshot(str(screenshot_path)):
         print(f"✓ Screenshot saved: {screenshot_path}")
+        for site_name in site_list:
+            update_site_status(site_name, **{"Screenshot name": screenshot_name})
     else:
         print("✗ Failed to save screenshot before import")
 
@@ -1322,16 +1794,21 @@ def import_profile_in_multipay(driver, handles, site_list):
     import_completed = attempt_step1_import_with_fallbacks(driver)
 
     if not import_completed:
-        print("\n▶ Manual verification for Step 1 import")
-        print("If import did not complete in UI, do it manually now in the same popup.")
-        prompt_input("▶ Press Enter after import is completed manually...")
+        for site_name in site_list:
+            record_run_issue(site_name, "Step 1", "Import did not complete automatically")
+        if is_final_batch:
+            print("\n▶ Manual verification for Step 1 import")
+            print("If import did not complete in UI, do it manually now in the same popup.")
+            prompt_input("▶ Press Enter after import is completed manually...")
+        else:
+            print("✗ Step 1 import did not complete automatically for this batch; continuing without manual pause")
     else:
         print("✓ Step 1 import completed automatically")
 
     print(f"✓ Step 1 complete: processed {len(site_list)} site(s), selected {total_selected} checkbox(es)")
 
 
-def upload_logo_in_multipay(driver, handles, logo_image_path=None):
+def upload_logo_in_multipay(driver, handles, logo_image_path=None, is_final_batch=False):
     """Step 2: upload/replace logo in MultiPay hosted payment custom text."""
     print("\n▶ Step 2: Upload logo in MultiPay Admin...")
     if not ensure_site_window(driver, handles, "multipay", MULTIPAY_URL, allow_reopen=True):
@@ -1354,16 +1831,19 @@ def upload_logo_in_multipay(driver, handles, logo_image_path=None):
         print("✗ Step 2 aborted. No site list context available.")
         return
 
-    close_tabs_after_site = prompt_yes_no(
-        "▶ Auto-close each Step 2 site tab after processing?",
-        default=False,
-    )
+    if not hasattr(upload_logo_in_multipay, "close_tabs_after_site"):
+        upload_logo_in_multipay.close_tabs_after_site = prompt_yes_no(
+            "▶ Auto-close each Step 2 site tab after processing?",
+            default=True,
+        )
+    close_tabs_after_site = upload_logo_in_multipay.close_tabs_after_site
 
     print("▶ Step 2 site loop started")
     base_window = driver.current_window_handle
     had_errors = False
 
     for index, site_name in enumerate(site_list, start=1):
+        is_final_site = is_final_batch and index == len(site_list)
         site_tab_handle = None
         try:
             print(f"▶ Step 2 processing site {index}/{len(site_list)}: {site_name}")
@@ -1384,6 +1864,7 @@ def upload_logo_in_multipay(driver, handles, logo_image_path=None):
             save_clicked = apply_custom_text_changes(driver)
 
             if save_clicked:
+                update_site_status(site_name, **{"LOGO Replaced": "Yes"})
                 if close_tabs_after_site:
                     driver.close()
                     driver.switch_to.window(base_window)
@@ -1392,20 +1873,25 @@ def upload_logo_in_multipay(driver, handles, logo_image_path=None):
                     print(f"✓ Step 2 site completed and tab kept open: {site_name}")
                     driver.switch_to.window(base_window)
             else:
+                record_run_issue(site_name, "Step 2", "Logo Save did not complete automatically")
                 print(
                     "⚠ Save did not complete automatically. "
                     f"Please save manually in the open tab for {site_name}."
                 )
-                prompt_input("▶ Press Enter after manual Save is completed...")
+                if is_final_site:
+                    prompt_input("▶ Press Enter after manual Save is completed...")
+                else:
+                    print("  Continuing without manual pause; site recorded as incomplete")
                 if close_tabs_after_site:
                     driver.close()
                     driver.switch_to.window(base_window)
-                    print(f"✓ Manual save confirmed and tab closed: {site_name}")
+                    print(f"✓ Step 2 incomplete tab closed: {site_name}")
                 else:
-                    print(f"✓ Manual save confirmed; tab left open: {site_name}")
+                    print(f"✓ Step 2 incomplete tab left open: {site_name}")
                     driver.switch_to.window(base_window)
         except Exception as exc:
             had_errors = True
+            record_run_issue(site_name, "Step 2", exc)
             print(f"✗ Step 2 site failed for {site_name}: {exc}")
             print(f"  Context: {get_driver_error_context(driver)}")
             try:
@@ -1435,14 +1921,14 @@ def upload_logo_in_multipay(driver, handles, logo_image_path=None):
 def UpdateMultipayAdmin(driver, handles, site_list, logo_image_path=None):
     """Run MultiPay Admin tasks: import profile and upload logo."""
     print("\n▶ Running UpdateMultipayAdmin()...")
-    import_profile_in_multipay(driver, handles, site_list)
-    upload_logo_in_multipay(driver, handles, logo_image_path)
+    import_profile_in_multipay(driver, handles, site_list, is_final_batch=True)
+    upload_logo_in_multipay(driver, handles, logo_image_path, is_final_batch=True)
     print("✓ UpdateMultipayAdmin() completed")
 
 
-def process_paydirect_admin_steps(driver, handles, site_list, update_css=False, enable_redirect=False, disable_swipe=False):
+def process_paydirect_admin_steps(driver, handles, site_list, update_css=False, enable_redirect=False, disable_swipe=False, append_css=False, reverse_css=False, reverse_swipe=False, disable_redirect=False, is_final_batch=False):
     """Run PayDirect Admin edit-page updates for each selected site."""
-    if not update_css and not enable_redirect and not disable_swipe:
+    if not update_css and not enable_redirect and not disable_swipe and not append_css and not reverse_css and not reverse_swipe and not disable_redirect:
         print("  No PayDirect Admin updates requested.")
         return
 
@@ -1452,41 +1938,132 @@ def process_paydirect_admin_steps(driver, handles, site_list, update_css=False, 
     print("▶ PayDirect site loop started")
     had_errors = False
     for index, site_name in enumerate(site_list, start=1):
+        is_final_site = is_final_batch and index == len(site_list)
         try:
             print(f"▶ PayDirect processing site {index}/{len(site_list)}: {site_name}")
             open_paydirect_edit_page_for_site(driver, site_name)
+            should_check_swipe_status = update_css or enable_redirect or disable_swipe
+            initial_swipe_checked = None
+            if update_css or enable_redirect or disable_swipe or append_css:
+                if not ensure_paydirect_return_urls(driver, site_name):
+                    record_run_issue(site_name, "PayDirect URL defaults", "Return/Cancel URL Save did not complete automatically")
+            if should_check_swipe_status:
+                initial_swipe_checked = get_paydirect_swipe_status(driver)
+                print(
+                    f"✓ Initial swipe support state for {site_name}: "
+                    f"{'checked' if initial_swipe_checked else 'unchecked'}"
+                )
 
             if update_css:
                 open_paydirect_look_and_feel_tab(driver)
-                set_paydirect_css_text(driver, PAYDIRECT_CSS_TEXT)
+                set_paydirect_css_text(driver, PAYDIRECT_CSS_TEXT, site_name=site_name)
                 if not click_paydirect_save_button(driver, site_name, "CSS update"):
-                    prompt_input("▶ Press Enter after manual CSS Save is completed...")
+                    record_run_issue(site_name, "Step 3", "CSS Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual CSS Save is completed...")
+                    else:
+                        print("✗ CSS Save did not complete automatically; continuing without manual pause")
+
+            if append_css:
+                open_paydirect_look_and_feel_tab(driver)
+                css_changed = append_paydirect_css_text(driver, PAYDIRECT_CSS_TEXT, site_name=site_name)
+                if not css_changed:
+                    print(f"✓ PayDirect CSS append skipped for {site_name}; standard CSS already present")
+                elif not click_paydirect_save_button(driver, site_name, "CSS append"):
+                    record_run_issue(site_name, "Step 6", "CSS append Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual CSS append Save is completed...")
+                    else:
+                        print("✗ CSS append Save did not complete automatically; continuing without manual pause")
+
+            if reverse_css:
+                open_paydirect_look_and_feel_tab(driver)
+                restore_paydirect_css_from_backup(driver, site_name)
+                if not click_paydirect_save_button(driver, site_name, "CSS restore"):
+                    record_run_issue(site_name, "Step 7", "CSS restore Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual CSS restore Save is completed...")
+                    else:
+                        print("✗ CSS restore Save did not complete automatically; continuing without manual pause")
 
             if disable_swipe:
                 open_paydirect_pos_tab(driver)
-                swipe_supported = WebDriverWait(driver, 20).until(
+                current_swipe_checked = WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.ID, "IsSwipeSupported"))
-                )
+                ).is_selected()
+                log_paydirect_swipe_status(site_name, current_swipe_checked)
                 print(
                     f"✓ Swipe support current state for {site_name}: "
-                    f"{'checked' if swipe_supported.is_selected() else 'unchecked'}"
+                    f"{'checked' if current_swipe_checked else 'unchecked'}"
                 )
                 set_checkbox_checked(driver, "IsSwipeSupported", checked=False)
                 if not click_paydirect_save_button(driver, site_name, "swipe support update"):
-                    prompt_input("▶ Press Enter after manual Swipe Save is completed...")
+                    record_run_issue(site_name, "Step 5", "Swipe Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual Swipe Save is completed...")
+                    else:
+                        print("✗ Swipe Save did not complete automatically; continuing without manual pause")
+
+            if reverse_swipe:
+                open_paydirect_pos_tab(driver)
+                previous_swipe_state = get_latest_paydirect_swipe_backup(site_name)
+                set_checkbox_checked(driver, "IsSwipeSupported", checked=previous_swipe_state)
+                if not click_paydirect_save_button(driver, site_name, "swipe support restore"):
+                    record_run_issue(site_name, "Step 8", "Swipe restore Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual Swipe restore Save is completed...")
+                    else:
+                        print("✗ Swipe restore Save did not complete automatically; continuing without manual pause")
 
             if enable_redirect:
                 open_paydirect_site_settings_tab(driver)
                 set_checkbox_checked(driver, "RedirectToMultipayWeb", checked=True)
                 if not click_paydirect_save_button(driver, site_name, "redirect flag update"):
-                    prompt_input("▶ Press Enter after manual redirect flag Save is completed...")
+                    record_run_issue(site_name, "Step 4", "Redirect flag Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual redirect flag Save is completed...")
+                    else:
+                        print("✗ Redirect flag Save did not complete automatically; continuing without manual pause")
+
+            if disable_redirect:
+                open_paydirect_site_settings_tab(driver)
+                set_checkbox_checked(driver, "RedirectToMultipayWeb", checked=False)
+                if not click_paydirect_save_button(driver, site_name, "redirect flag uncheck"):
+                    record_run_issue(site_name, "Step 9", "Redirect flag uncheck Save did not complete automatically")
+                    if is_final_site:
+                        prompt_input("▶ Press Enter after manual redirect uncheck Save is completed...")
+                    else:
+                        print("✗ Redirect uncheck Save did not complete automatically; continuing without manual pause")
+
+            if should_check_swipe_status and initial_swipe_checked is not None:
+                final_swipe_checked = get_paydirect_swipe_status(driver)
+                update_paydirect_swipe_status_result(site_name, initial_swipe_checked, final_swipe_checked)
 
             print(f"✓ PayDirect site completed: {site_name}")
         except Exception as exc:
             had_errors = True
+            active_steps = []
+            if update_css:
+                active_steps.append("Step 3")
+            if enable_redirect:
+                active_steps.append("Step 4")
+            if disable_swipe:
+                active_steps.append("Step 5")
+            if append_css:
+                active_steps.append("Step 6")
+            if reverse_css:
+                active_steps.append("Step 7")
+            if reverse_swipe:
+                active_steps.append("Step 8")
+            if disable_redirect:
+                active_steps.append("Step 9")
+            record_run_issue(site_name, "+".join(active_steps) or "PayDirect", exc)
             print(f"✗ PayDirect site failed for {site_name}: {exc}")
             print(f"  Context: {get_driver_error_context(driver)}")
-            prompt_input("▶ Press Enter to continue with the next PayDirect site...")
+            if is_final_site:
+                prompt_input("▶ Press Enter to continue after the final PayDirect site failure...")
+            else:
+                print("  Continuing with the next PayDirect site without manual pause...")
 
     if had_errors:
         print("✗ PayDirect Admin updates completed with errors. Review ERROR log lines above.")
@@ -1494,22 +2071,46 @@ def process_paydirect_admin_steps(driver, handles, site_list, update_css=False, 
         print("✓ PayDirect Admin updates completed for all sites")
 
 
-def update_css_in_paydirect(driver, handles, site_list):
+def update_css_in_paydirect(driver, handles, site_list, is_final_batch=False):
     """Step 3: update CSS in PayDirect Admin."""
     print("\n▶ Step 3: Update CSS in PayDirect Admin...")
-    process_paydirect_admin_steps(driver, handles, site_list, update_css=True, enable_redirect=False)
+    process_paydirect_admin_steps(driver, handles, site_list, update_css=True, enable_redirect=False, is_final_batch=is_final_batch)
 
 
-def enable_redirect_flag_in_paydirect(driver, handles, site_list):
+def enable_redirect_flag_in_paydirect(driver, handles, site_list, is_final_batch=False):
     """Step 4: switch on redirect flag in PayDirect Admin."""
     print("\n▶ Step 4: Switch on redirect flag in PayDirect Admin...")
-    process_paydirect_admin_steps(driver, handles, site_list, update_css=False, enable_redirect=True)
+    process_paydirect_admin_steps(driver, handles, site_list, update_css=False, enable_redirect=True, is_final_batch=is_final_batch)
 
 
-def unsupport_swipe_in_paydirect(driver, handles, site_list):
+def unsupport_swipe_in_paydirect(driver, handles, site_list, is_final_batch=False):
     """Step 5: uncheck swipe support in PayDirect Admin."""
     print("\n▶ Step 5: Unsupport Swipe in PayDirect Admin...")
-    process_paydirect_admin_steps(driver, handles, site_list, disable_swipe=True)
+    process_paydirect_admin_steps(driver, handles, site_list, disable_swipe=True, is_final_batch=is_final_batch)
+
+
+def append_css_in_paydirect(driver, handles, site_list, is_final_batch=False):
+    """Step 6: append CSS in PayDirect Admin."""
+    print("\n▶ Step 6: Append CSS in PayDirect Admin...")
+    process_paydirect_admin_steps(driver, handles, site_list, append_css=True, is_final_batch=is_final_batch)
+
+
+def reverse_css_in_paydirect(driver, handles, site_list, is_final_batch=False):
+    """Step 7: restore CSS from the PayDirect CSS backup log."""
+    print("\n▶ Step 7: Reverse CSS change in PayDirect Admin...")
+    process_paydirect_admin_steps(driver, handles, site_list, reverse_css=True, is_final_batch=is_final_batch)
+
+
+def reverse_swipe_in_paydirect(driver, handles, site_list, is_final_batch=False):
+    """Step 8: restore Swipe checkbox state from the PayDirect swipe backup log."""
+    print("\n▶ Step 8: Reverse Swipe checkbox in PayDirect Admin...")
+    process_paydirect_admin_steps(driver, handles, site_list, reverse_swipe=True, is_final_batch=is_final_batch)
+
+
+def uncheck_redirect_flag_in_paydirect(driver, handles, site_list, is_final_batch=False):
+    """Step 9: uncheck redirect flag in PayDirect Admin."""
+    print("\n▶ Step 9: Uncheck redirect flag in PayDirect Admin...")
+    process_paydirect_admin_steps(driver, handles, site_list, disable_redirect=True, is_final_batch=is_final_batch)
 
 
 def UpdatePayDirectAdmin(driver, handles, site_list):
@@ -1519,41 +2120,260 @@ def UpdatePayDirectAdmin(driver, handles, site_list):
     print("✓ UpdatePayDirectAdmin() completed")
 
 
-def execute_single_step(driver, handles, site_list, step, logo_image_path=None):
+def execute_paydirect_step_on_current_site(driver, site_name, step, is_final_site=False):
+    """Run one PayDirect step on the currently loaded edit page."""
+    if step == "3":
+        open_paydirect_look_and_feel_tab(driver)
+        set_paydirect_css_text(driver, PAYDIRECT_CSS_TEXT, site_name=site_name)
+        if not click_paydirect_save_button(driver, site_name, "CSS update"):
+            record_run_issue(site_name, "Step 3", "CSS Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual CSS Save is completed...")
+            else:
+                print("✗ CSS Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"CSS saved": "Yes"})
+    elif step == "4":
+        open_paydirect_site_settings_tab(driver)
+        set_checkbox_checked(driver, "RedirectToMultipayWeb", checked=True)
+        if not click_paydirect_save_button(driver, site_name, "redirect flag update"):
+            record_run_issue(site_name, "Step 4", "Redirect flag Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual redirect flag Save is completed...")
+            else:
+                print("✗ Redirect flag Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"Redirect done": "Yes"})
+    elif step == "5":
+        open_paydirect_pos_tab(driver)
+        current_swipe_checked = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, "IsSwipeSupported"))
+        ).is_selected()
+        log_paydirect_swipe_status(site_name, current_swipe_checked)
+        print(
+            f"✓ Swipe support current state for {site_name}: "
+            f"{'checked' if current_swipe_checked else 'unchecked'}"
+        )
+        set_checkbox_checked(driver, "IsSwipeSupported", checked=False)
+        if not click_paydirect_save_button(driver, site_name, "swipe support update"):
+            record_run_issue(site_name, "Step 5", "Swipe Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual Swipe Save is completed...")
+            else:
+                print("✗ Swipe Save did not complete automatically; continuing without manual pause")
+    elif step == "6":
+        open_paydirect_look_and_feel_tab(driver)
+        css_changed = append_paydirect_css_text(driver, PAYDIRECT_CSS_TEXT, site_name=site_name)
+        if not css_changed:
+            print(f"✓ PayDirect CSS append skipped for {site_name}; standard CSS already present")
+            update_site_status(site_name, **{"CSS saved": "Yes"})
+        elif not click_paydirect_save_button(driver, site_name, "CSS append"):
+            record_run_issue(site_name, "Step 6", "CSS append Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual CSS append Save is completed...")
+            else:
+                print("✗ CSS append Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"CSS saved": "Yes"})
+    elif step == "7":
+        open_paydirect_look_and_feel_tab(driver)
+        restore_paydirect_css_from_backup(driver, site_name)
+        if not click_paydirect_save_button(driver, site_name, "CSS restore"):
+            record_run_issue(site_name, "Step 7", "CSS restore Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual CSS restore Save is completed...")
+            else:
+                print("✗ CSS restore Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"Undo CSS": "Yes"})
+    elif step == "8":
+        open_paydirect_pos_tab(driver)
+        previous_swipe_state = get_latest_paydirect_swipe_backup(site_name)
+        set_checkbox_checked(driver, "IsSwipeSupported", checked=previous_swipe_state)
+        if not click_paydirect_save_button(driver, site_name, "swipe support restore"):
+            record_run_issue(site_name, "Step 8", "Swipe restore Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual Swipe restore Save is completed...")
+            else:
+                print("✗ Swipe restore Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"Undo Swipe": "Yes"})
+    elif step == "9":
+        open_paydirect_site_settings_tab(driver)
+        set_checkbox_checked(driver, "RedirectToMultipayWeb", checked=False)
+        if not click_paydirect_save_button(driver, site_name, "redirect flag uncheck"):
+            record_run_issue(site_name, "Step 9", "Redirect flag uncheck Save did not complete automatically")
+            if is_final_site:
+                prompt_input("▶ Press Enter after manual redirect uncheck Save is completed...")
+            else:
+                print("✗ Redirect uncheck Save did not complete automatically; continuing without manual pause")
+        else:
+            update_site_status(site_name, **{"Undo Redirect": "Yes"})
+    else:
+        raise ValueError(f"Unknown PayDirect step: {step}")
+
+
+def execute_paydirect_steps_for_sites(driver, handles, site_list, paydirect_steps, is_final_batch=False):
+    """Run selected PayDirect steps with one edit-page load per site."""
+    if not paydirect_steps:
+        return
+
+    if not ensure_site_window(driver, handles, "paydirect", PAYDIRECT_URL, allow_reopen=True):
+        raise RuntimeError("PayDirect window is not available and could not be recovered.")
+
+    print(f"\n▶ Running PayDirect steps in one pass per site: {''.join(paydirect_steps)}")
+    had_errors = False
+    for index, site_name in enumerate(site_list, start=1):
+        is_final_site = is_final_batch and index == len(site_list)
+        try:
+            print(f"▶ PayDirect processing site {index}/{len(site_list)}: {site_name}")
+            open_paydirect_edit_page_for_site(driver, site_name)
+            should_check_swipe_status = any(step in {"3", "4", "5"} for step in paydirect_steps)
+            initial_swipe_checked = None
+            if any(step in {"3", "4", "5", "6"} for step in paydirect_steps):
+                if not ensure_paydirect_return_urls(driver, site_name):
+                    record_run_issue(site_name, "PayDirect URL defaults", "Return/Cancel URL Save did not complete automatically")
+            if should_check_swipe_status:
+                initial_swipe_checked = get_paydirect_swipe_status(driver)
+                print(
+                    f"✓ Initial swipe support state for {site_name}: "
+                    f"{'checked' if initial_swipe_checked else 'unchecked'}"
+                )
+            for step in paydirect_steps:
+                execute_paydirect_step_on_current_site(driver, site_name, step, is_final_site=is_final_site)
+            if should_check_swipe_status and initial_swipe_checked is not None:
+                final_swipe_checked = get_paydirect_swipe_status(driver)
+                update_paydirect_swipe_status_result(site_name, initial_swipe_checked, final_swipe_checked)
+            print(f"✓ PayDirect site completed: {site_name}")
+        except Exception as exc:
+            had_errors = True
+            record_run_issue(site_name, "+".join(f"Step {step}" for step in paydirect_steps), exc)
+            print(f"✗ PayDirect site failed for {site_name}: {exc}")
+            print(f"  Context: {get_driver_error_context(driver)}")
+            if is_final_site:
+                prompt_input("▶ Press Enter to continue after the final PayDirect site failure...")
+            else:
+                print("  Continuing with the next PayDirect site without manual pause...")
+
+    if had_errors:
+        print("✗ PayDirect Admin updates completed with errors. Review ERROR log lines above.")
+    else:
+        print("✓ PayDirect Admin updates completed for all sites")
+
+
+def execute_single_step(driver, handles, site_list, step, logo_image_path=None, is_final_batch=False):
     """Run one selected workflow step."""
     if step == "1":
-        import_profile_in_multipay(driver, handles, site_list)
+        import_profile_in_multipay(driver, handles, site_list, is_final_batch=is_final_batch)
     elif step == "2":
         upload_logo_in_multipay.site_list_context = site_list
-        upload_logo_in_multipay(driver, handles, logo_image_path)
+        upload_logo_in_multipay(driver, handles, logo_image_path, is_final_batch=is_final_batch)
     elif step == "3":
-        update_css_in_paydirect(driver, handles, site_list)
+        update_css_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
     elif step == "4":
-        enable_redirect_flag_in_paydirect(driver, handles, site_list)
+        enable_redirect_flag_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
     elif step == "5":
-        unsupport_swipe_in_paydirect(driver, handles, site_list)
+        unsupport_swipe_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
+    elif step == "6":
+        append_css_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
+    elif step == "7":
+        reverse_css_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
+    elif step == "8":
+        reverse_swipe_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
+    elif step == "9":
+        uncheck_redirect_flag_in_paydirect(driver, handles, site_list, is_final_batch=is_final_batch)
     else:
         raise ValueError(f"Unknown step: {step}")
 
 
-def execute_selected_steps(driver, handles, site_list, selected_steps, logo_image_path=None):
+def execute_selected_steps(driver, handles, site_list, selected_steps, logo_image_path=None, is_final_batch=False):
     """Run selected steps in the exact requested order."""
     print(f"\n▶ Executing selected steps in requested order: {''.join(selected_steps)}")
     had_step_errors = False
+    paydirect_steps = {"3", "4", "5", "6", "7", "8", "9"}
+    step_index = 0
 
-    for step in selected_steps:
+    while step_index < len(selected_steps):
+        step = selected_steps[step_index]
+        if step in paydirect_steps:
+            grouped_steps = []
+            while step_index < len(selected_steps) and selected_steps[step_index] in paydirect_steps:
+                grouped_steps.append(selected_steps[step_index])
+                step_index += 1
+            try:
+                execute_paydirect_steps_for_sites(
+                    driver,
+                    handles,
+                    site_list,
+                    grouped_steps,
+                    is_final_batch=is_final_batch,
+                )
+            except Exception as exc:
+                had_step_errors = True
+                for site_name in site_list:
+                    record_run_issue(site_name, "+".join(f"Step {item}" for item in grouped_steps), exc)
+                print(f"✗ PayDirect steps {''.join(grouped_steps)} failed: {exc}")
+                print(f"  Context: {get_driver_error_context(driver)}")
+                if is_final_batch:
+                    prompt_input("▶ Press Enter to continue after the final batch PayDirect failure...")
+                else:
+                    print("  Continuing to the next selected step without manual pause...")
+            continue
+
         try:
-            execute_single_step(driver, handles, site_list, step, logo_image_path)
+            execute_single_step(driver, handles, site_list, step, logo_image_path, is_final_batch=is_final_batch)
         except Exception as exc:
             had_step_errors = True
+            for site_name in site_list:
+                record_run_issue(site_name, f"Step {step}", exc)
             print(f"✗ Step {step} failed: {exc}")
             print(f"  Context: {get_driver_error_context(driver)}")
-            prompt_input("▶ Press Enter to continue to the next selected step...")
+            if is_final_batch:
+                prompt_input("▶ Press Enter to continue after the final batch step failure...")
+            else:
+                print("  Continuing to the next selected step without manual pause...")
+        step_index += 1
 
     if had_step_errors:
         print("✗ Selected steps completed with errors. Review ERROR log lines above.")
     else:
         print("✓ Selected steps completed")
+
+
+def get_site_batches(site_list, batch_size=BATCH_SIZE):
+    """Split site names into batches for long runs."""
+    if not site_list:
+        return []
+    return [site_list[index:index + batch_size] for index in range(0, len(site_list), batch_size)]
+
+
+def execute_selected_steps_in_batches(driver, handles, site_list, selected_steps, logo_image_path=None):
+    """Run selected steps across the full site list in fixed-size batches."""
+    site_batches = get_site_batches(site_list)
+    total_batches = len(site_batches)
+    print(
+        f"\n▶ Batch processing enabled: {len(site_list)} site(s), "
+        f"batch size={BATCH_SIZE}, total batches={total_batches}"
+    )
+
+    for batch_index, site_batch in enumerate(site_batches, start=1):
+        is_final_batch = batch_index == total_batches
+        print("\n" + "=" * 60)
+        print(
+            f"▶ Starting batch {batch_index}/{total_batches}: "
+            f"{len(site_batch)} site(s)"
+        )
+        print(f"  Batch sites: {get_site_preview(site_batch)}")
+        print("=" * 60)
+        execute_selected_steps(
+            driver,
+            handles,
+            site_batch,
+            selected_steps,
+            logo_image_path,
+            is_final_batch=is_final_batch,
+        )
+        write_status_csv(reason=f"updated after batch {batch_index}/{total_batches}")
 
 
 def selected_steps_require_multipay(selected_steps):
@@ -1563,7 +2383,7 @@ def selected_steps_require_multipay(selected_steps):
 
 def selected_steps_require_paydirect(selected_steps):
     """Return whether the selected steps require PayDirect Admin."""
-    return any(step in {"3", "4", "5"} for step in selected_steps)
+    return any(step in {"3", "4", "5", "6", "7", "8", "9"} for step in selected_steps)
 
 
 def prepare_required_sites_for_steps(driver, handles, selected_steps):
@@ -1625,7 +2445,9 @@ def main():
         paydirect_required = selected_steps_require_paydirect(selected_steps)
         Site_list = ""
         site_list = get_site_list(Site_list)
-        print(f"✓ Loaded {len(site_list)} site(s): {', '.join(site_list)}")
+        initialize_status_rows(site_list)
+        write_status_csv(reason="created")
+        print(f"✓ Loaded {len(site_list)} site(s): {get_site_preview(site_list)}")
 
         driver = initialize_driver(browser_choice, profile_dir=profile_dir)
         if not driver:
@@ -1653,15 +2475,19 @@ def main():
             print(f"✓ Step 2 will use fixed logo path: {logo_image_path}")
 
         while selected_steps:
-            execute_selected_steps(driver, handles, site_list, selected_steps, logo_image_path)
+            execute_selected_steps_in_batches(driver, handles, site_list, selected_steps, logo_image_path)
             selected_steps = get_followup_steps()
             if selected_steps:
                 prepare_required_sites_for_steps(driver, handles, selected_steps)
 
+        display_run_issues()
+        write_status_csv(reason="finalized")
         print("\n✓ Workflow completed.")
 
     except Exception as exc:
         print(f"✗ Fatal error: {exc}")
+        display_run_issues()
+        write_status_csv(reason="updated after fatal error")
     finally:
         if driver:
             driver.quit()

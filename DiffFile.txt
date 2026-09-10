@@ -1,4 +1,6 @@
 Checking diff between files :./its and ./its
 [Errno 2] No such file or directory: './its'
 [Errno 2] No such file or directory: 'D:\\ITS\\its_tds\\impl\\tds\\config\\b2c-bc\\fmtmpls\\bc-II\\application.ftl'
+Checking diff between files :& '\\p5zlgftp21.fisfedcloud.com\PayDirectSFTP\00FMedina\Custom MAF Conversion\Yonkers\YonkersPVB\L2GtoYonkers_Batch17296668_20260211.txt' and \\P5ZLGFTP21.fisfedcloud.com\Prodsftp\Yonkers\YonkersPVB\Archive\L2GtoYonkers_Batch17296668_20260211.txt
+[Errno 2] No such file or directory: "& '\\\\p5zlgftp21.fisfedcloud.com\\PayDirectSFTP\\00FMedina\\Custom MAF Conversion\\Yonkers\\YonkersPVB\\L2GtoYonkers_Batch17296668_20260211.txt'"
 
