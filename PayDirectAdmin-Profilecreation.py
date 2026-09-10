@@ -19,7 +19,14 @@ STANDARD_TEMPLATE = TEMPLATE_DIRECTORY / "EdmondsPDATermplate020823.xml"
 UPLOAD_INPUT_ID = "uploadedImportFile"
 UPLOAD_BUTTON_ID = "importFileUploadButton"
 TRUSTED_DOMAINS = "wipp.edmundsassoc.com\nwipp.edmundsgovtech.cloud"
-REQUIRED_PROFILE_FIELDS = ("UniqueSiteName", "SiteNameGiven", "State")
+MERCHANT_CODE_PASSWORD = "3dMunD5"
+REQUIRED_PROFILE_FIELDS = (
+    "UniqueSiteName",
+    "SiteNameGiven",
+    "State",
+    "L2GMerchantCode",
+    "UniqueID",
+)
 VALID_STATE_CODES = {
     "AL", "AK", "AS", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
     "GA", "GU", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
@@ -211,6 +218,11 @@ def replace_element_value(element, value):
     element.send_keys(value)
 
 
+def set_checkbox_state(driver, checkbox, checked):
+    if checkbox.is_selected() != checked:
+        driver.execute_script("arguments[0].click();", checkbox)
+
+
 def populate_imported_profile(driver, fields):
     wait = WebDriverWait(driver, 30)
     merchant_name = wait.until(
@@ -225,23 +237,48 @@ def populate_imported_profile(driver, fields):
     default_state = wait.until(
         EC.presence_of_element_located((By.ID, "DefaultState"))
     )
+    merchant_code = wait.until(
+        EC.presence_of_element_located((By.ID, "MerchantCode"))
+    )
+    merchant_code_password = wait.until(
+        EC.presence_of_element_located((By.ID, "MerchantCodePassword"))
+    )
+    settle_code = wait.until(
+        EC.presence_of_element_located((By.ID, "SettleCode"))
+    )
+    swipe_supported = wait.until(
+        EC.presence_of_element_located((By.ID, "IsSwipeSupported"))
+    )
 
     replace_element_value(merchant_name, fields["UniqueSiteName"])
     replace_element_value(merchant_site_name, fields["SiteNameGiven"])
     replace_element_value(trusted_domains, TRUSTED_DOMAINS)
     Select(default_state).select_by_value(fields["State"])
+    replace_element_value(merchant_code, fields["L2GMerchantCode"])
+    replace_element_value(merchant_code_password, MERCHANT_CODE_PASSWORD)
+    replace_element_value(settle_code, fields["UniqueID"])
+    should_support_swipe = fields["UniqueSiteName"].strip().casefold().endswith(" vt")
+    set_checkbox_state(driver, swipe_supported, should_support_swipe)
 
     populated_values = {
         "MerchantName": merchant_name.get_attribute("value"),
         "MerchantSiteName": merchant_site_name.get_attribute("value"),
         "TrustedDomains": trusted_domains.get_attribute("value"),
         "DefaultState": Select(default_state).first_selected_option.get_attribute("value"),
+        "MerchantCode": merchant_code.get_attribute("value"),
+        "MerchantCodePassword": merchant_code_password.get_attribute("value"),
+        "SettleCode": settle_code.get_attribute("value"),
+        "IsSwipeSupported": swipe_supported.is_selected(),
     }
     expected_values = {
         "MerchantName": fields["UniqueSiteName"],
         "MerchantSiteName": fields["SiteNameGiven"],
         "TrustedDomains": TRUSTED_DOMAINS,
         "DefaultState": fields["State"],
+        "MerchantCode": fields["L2GMerchantCode"],
+        "MerchantCodePassword": MERCHANT_CODE_PASSWORD,
+        "SettleCode": fields["UniqueID"],
+        "IsSwipeSupported": should_support_swipe,
     }
     incorrect_fields = [
         field_name
