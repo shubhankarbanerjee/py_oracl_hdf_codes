@@ -7,7 +7,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
@@ -18,6 +18,15 @@ PARKS_AND_RECREATION_TEMPLATE = TEMPLATE_DIRECTORY / "EDM_ParksNRec_Templ.xml"
 STANDARD_TEMPLATE = TEMPLATE_DIRECTORY / "EdmondsPDATermplate020823.xml"
 UPLOAD_INPUT_ID = "uploadedImportFile"
 UPLOAD_BUTTON_ID = "importFileUploadButton"
+TRUSTED_DOMAINS = "wipp.edmundsassoc.com\nwipp.edmundsgovtech.cloud"
+REQUIRED_PROFILE_FIELDS = ("UniqueSiteName", "SiteNameGiven", "State")
+VALID_STATE_CODES = {
+    "AL", "AK", "AS", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+    "GA", "GU", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+    "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "PR", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VI", "VA", "WA", "WV", "WI", "WY",
+}
 
 
 def prompt_yes_no(prompt, default=False):
@@ -96,9 +105,22 @@ def resolve_open_items(fields):
 
 
 def validate_profile_fields(fields):
-    unique_site_name = fields.get("UniqueSiteName", "").strip()
-    if not unique_site_name:
-        raise ValueError("UniqueSiteName is required to select an XML template.")
+    missing_fields = [
+        field_name
+        for field_name in REQUIRED_PROFILE_FIELDS
+        if not fields.get(field_name, "").strip()
+    ]
+    if missing_fields:
+        raise ValueError(
+            "Required input value(s) missing: " + ", ".join(missing_fields)
+        )
+
+    state_code = fields["State"].strip().upper()
+    if state_code not in VALID_STATE_CODES:
+        raise ValueError(
+            f"State must be a valid two-letter code. Received: {fields['State']!r}"
+        )
+    fields["State"] = state_code
 
     payment_method = fields.get("PaymentMethod")
     if payment_method:
@@ -178,10 +200,59 @@ def upload_template(driver, template_path):
         EC.element_to_be_clickable((By.ID, UPLOAD_BUTTON_ID))
     )
     upload_button.click()
+    WebDriverWait(driver, 30).until(EC.staleness_of(file_input))
     WebDriverWait(driver, 30).until(
-        lambda current_driver: current_driver.execute_script("return document.readyState")
-        == "complete"
+        EC.presence_of_element_located((By.ID, "MerchantName"))
     )
+
+
+def replace_element_value(element, value):
+    element.clear()
+    element.send_keys(value)
+
+
+def populate_imported_profile(driver, fields):
+    wait = WebDriverWait(driver, 30)
+    merchant_name = wait.until(
+        EC.visibility_of_element_located((By.ID, "MerchantName"))
+    )
+    merchant_site_name = wait.until(
+        EC.visibility_of_element_located((By.ID, "MerchantSiteName"))
+    )
+    trusted_domains = wait.until(
+        EC.visibility_of_element_located((By.ID, "TrustedDomains"))
+    )
+    default_state = wait.until(
+        EC.presence_of_element_located((By.ID, "DefaultState"))
+    )
+
+    replace_element_value(merchant_name, fields["UniqueSiteName"])
+    replace_element_value(merchant_site_name, fields["SiteNameGiven"])
+    replace_element_value(trusted_domains, TRUSTED_DOMAINS)
+    Select(default_state).select_by_value(fields["State"])
+
+    populated_values = {
+        "MerchantName": merchant_name.get_attribute("value"),
+        "MerchantSiteName": merchant_site_name.get_attribute("value"),
+        "TrustedDomains": trusted_domains.get_attribute("value"),
+        "DefaultState": Select(default_state).first_selected_option.get_attribute("value"),
+    }
+    expected_values = {
+        "MerchantName": fields["UniqueSiteName"],
+        "MerchantSiteName": fields["SiteNameGiven"],
+        "TrustedDomains": TRUSTED_DOMAINS,
+        "DefaultState": fields["State"],
+    }
+    incorrect_fields = [
+        field_name
+        for field_name, expected_value in expected_values.items()
+        if populated_values[field_name] != expected_value
+    ]
+    if incorrect_fields:
+        raise RuntimeError(
+            "Imported form value verification failed for: "
+            + ", ".join(incorrect_fields)
+        )
 
 
 def display_input_summary(fields, other_lines, template_path):
@@ -210,7 +281,8 @@ def main():
         print(f"\nOpening PayDirect Create Merchant page in {browser_type.title()}...")
         driver = initialize_driver(browser_type)
         upload_template(driver, template_path)
-        print("\nXML uploaded. The imported merchant settings should now be populated.")
+        populate_imported_profile(driver, fields)
+        print("\nXML uploaded and required merchant fields populated successfully.")
         input("Review the form in the browser, then press Enter to close it...")
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"\nError: {exc}")
