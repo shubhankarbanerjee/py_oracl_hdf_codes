@@ -30,6 +30,7 @@ SESSION_CONTEXT_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.session.j
 COOKIE_STORE_PATH = Path(__file__).with_name("PayDirAdminMig2Mulpay.cookies.json")
 SCREENSHOTS_DIR = Path(__file__).with_name("screenshots")
 BATCH_SIZE = 50
+PAYDIRECT_CACHE_MIN_SITES = 20
 RUN_ISSUES = []
 PAYDIRECT_PROFILE_CACHE = {}
 PAYDIRECT_PROFILE_CACHE_LOADED = False
@@ -49,6 +50,8 @@ STATUS_CSV_COLUMNS = [
     "PD_Site_URL",
     "Merchant Code",
 ]
+
+PAYDIRECT_CSS_TEXT1 = ""
 PAYDIRECT_CSS_TEXT = """#submitButton allowAutoDisable{ color: red; } input.submitButton {color: red !important; } #SubmitButton { color: red !important; }
 
  .multipay-font {
@@ -929,10 +932,7 @@ def apply_custom_text_changes(driver):
 
 def open_hosted_payment_tab_for_site(driver, site_name):
     """Open hosted payment custom-text page for a specific site in a new tab."""
-    site_url = (
-        "https://app.multipayadmin.cus.prod.comm.fisfedcloud.com/"
-        f"multipay-web-admin/merchants/{site_name}/custom-text/hosted-payment"
-    )
+    site_url = urljoin(MULTIPAY_URL, f"multipay-web-admin/merchants/{site_name}/custom-text/checkout")
     driver.switch_to.new_window("tab")
     driver.get(site_url)
     wait_for_clickable(driver, By.ID, "siteHeader", timeout=30)
@@ -1045,7 +1045,9 @@ def get_paydirect_edit_url_from_row(row):
 
 def open_paydirect_edit_page_for_site(driver, site_name):
     """Open the PayDirect edit page for one site by resolving it from the profile table."""
-    load_paydirect_profile_cache(driver)
+    # STATUS_ROWS holds every site requested in this run.
+    if len(STATUS_ROWS) >= PAYDIRECT_CACHE_MIN_SITES:
+        load_paydirect_profile_cache(driver)
     profile = PAYDIRECT_PROFILE_CACHE.get(site_name.strip().lower())
     if profile and profile.get("edit_url"):
         edit_url = profile["edit_url"]
