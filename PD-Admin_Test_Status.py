@@ -1,10 +1,14 @@
+import base64
 import builtins
 import csv
 from datetime import datetime
 import html
 import json
+import os
 from pathlib import Path
 import re
+import socket
+import subprocess
 import time
 
 from playwright.sync_api import Error as PlaywrightError
@@ -33,7 +37,25 @@ TARGET_ENVIRONMENT = "PROD"
 NAV_TIMEOUT_MS = 60_000
 REDIRECT_TIMEOUT_S = 60
 SETTLE_STABLE_S = 3
-VIEWPORT = {"width": 1366, "height": 768}
+VIDEO_SIZE = (1280, 720)
+VIDEO_FPS = 25
+BROWSER_PROFILE_ROOT = BASE_DIR / ".pdadmin_browser_profile"
+BROWSER_EXECUTABLES = {
+    "chrome": [
+        r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+        r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+    ],
+    "edge": [
+        r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+        r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+    ],
+}
+# PayDirect uses Windows (NTLM/Negotiate) auth; allow the current Windows identity for this host.
+BROWSER_ARGS = [
+    "--auth-server-allowlist=p5zlgintc01,*.p5zlgintc01",
+    "--auth-negotiate-delegate-allowlist=p5zlgintc01,*.p5zlgintc01",
+]
 
 CSV_COLUMNS = [
     "Name",
@@ -213,38 +235,182 @@ def get_site_entries():
 # ---------------------------------------------------------------------------
 # Browser / session
 # ---------------------------------------------------------------------------
+def find_browser_executable(browser_choice):
+    for candidate in BROWSER_EXECUTABLES[browser_choice]:
+        path = Path(os.path.expandvars(candidate))
+        if path.is_file():
+            return path
+    raise RuntimeError(f"{browser_choice} executable not found in the standard install locations")
+
+
+def get_free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def launch_browser(playwright, browser_choice):
-    """Launch the installed Chrome/Edge, falling back to Playwright's Chromium."""
-    channel = "msedge" if browser_choice == "edge" else "chrome"
-    print(f"\n▶ Launching browser (channel={channel})...")
-    try:
-        browser = playwright.chromium.launch(channel=channel, headless=False)
-    except PlaywrightError as exc:
-        print(f"⚠ Could not launch {channel}: {exc}")
-        print("▶ Falling back to Playwright bundled Chromium...")
-        browser = playwright.chromium.launch(headless=False)
-    print("✓ Browser launched")
-    return browser
+    """Start a normal Chrome/Edge window (native login prompts work) and attach Playwright to it."""
+    executable = find_browser_executable(browser_choice)
+    profile_dir = BROWSER_PROFILE_ROOT / browser_choice
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    port = get_free_port()
+    print(f"\n▶ Launching {executable.name} with dedicated profile: {profile_dir}")
+    process = subprocess.Popen(
+        [
+            str(executable),
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+            *BROWSER_ARGS,
+            PAYDIRECT_URL,
+        ]
+    )
+
+    endpoint = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            browser = playwright.chromium.connect_over_cdp(endpoint)
+            break
+        except PlaywrightError:
+            if time.monotonic() > deadline:
+                process.terminate()
+                raise RuntimeError(
+                    f"Could not attach to {executable.name}. Close any browser window already using {profile_dir} and retry."
+                )
+            time.sleep(0.5)
+    print(f"✓ Browser launched and attached ({endpoint})")
+    return browser, process
 
 
-def create_context(browser, record_video):
-    """Create a browser context, restoring saved cookies/storage when available."""
-    context_options = {"viewport": VIEWPORT}
-    if record_video:
-        VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-        context_options["record_video_dir"] = str(VIDEOS_DIR)
-        context_options["record_video_size"] = VIEWPORT
-
+def get_session(browser):
+    """Return the browser's default context and its PayDirect tab, restoring saved cookies."""
+    context = browser.contexts[0]
+    context.set_default_timeout(NAV_TIMEOUT_MS)
     if STORAGE_STATE_PATH.exists():
         try:
-            context = browser.new_context(storage_state=str(STORAGE_STATE_PATH), **context_options)
-            print(f"✓ Session cookies/storage loaded from {STORAGE_STATE_PATH.name}")
-            return context
+            cookies = json.loads(STORAGE_STATE_PATH.read_text(encoding="utf-8")).get("cookies", [])
+            if cookies:
+                context.add_cookies(cookies)
+                print(f"✓ Session cookies loaded from {STORAGE_STATE_PATH.name}: {len(cookies)}")
         except Exception as exc:
-            print(f"⚠ Saved session could not be loaded ({exc}); starting a fresh session")
+            print(f"⚠ Saved cookies could not be loaded ({exc})")
+    else:
+        print("  No saved cookie file found.")
 
-    print("  No saved session found. Starting a fresh session.")
-    return browser.new_context(**context_options)
+    page = context.pages[0] if context.pages else context.new_page()
+    for extra_page in context.pages[1:]:
+        extra_page.close()
+    page.bring_to_front()
+    return context, page
+
+
+def close_browser(browser, process):
+    """Close the launched browser cleanly so the profile is flushed to disk."""
+    try:
+        browser.new_browser_cdp_session().send("Browser.close")
+    except Exception:
+        pass
+    try:
+        browser.close()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+
+
+def find_ffmpeg():
+    root = Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
+    matches = sorted(root.glob("ffmpeg-*/ffmpeg-win64.exe"))
+    return matches[-1] if matches else None
+
+
+class ScreencastRecorder:
+    """Records one page to WebM by piping CDP screencast JPEG frames into Playwright's ffmpeg."""
+
+    def __init__(self, page, output_path, ffmpeg_path):
+        self.page = page
+        self.output_path = output_path
+        self.ffmpeg_path = ffmpeg_path
+        self.session = None
+        self.process = None
+        self.last_frame = None
+        self.last_time = None
+
+    def start(self):
+        width, height = VIDEO_SIZE
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.process = subprocess.Popen(
+            [
+                str(self.ffmpeg_path), "-loglevel", "error",
+                "-f", "image2pipe", "-avioflags", "direct", "-fpsprobesize", "0",
+                "-probesize", "32", "-analyzeduration", "0", "-c:v", "mjpeg", "-i", "pipe:0",
+                "-y", "-an", "-r", str(VIDEO_FPS), "-c:v", "vp8", "-qmin", "0", "-qmax", "50",
+                "-crf", "8", "-deadline", "realtime", "-speed", "8", "-b:v", "1M", "-threads", "1",
+                "-vf", f"pad={width}:{height}:0:0:gray,crop={width}:{height}:0:0",
+                str(self.output_path),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.session = self.page.context.new_cdp_session(self.page)
+        self.session.on("Page.screencastFrame", self._on_frame)
+        self.session.send(
+            "Page.startScreencast",
+            {"format": "jpeg", "quality": 80, "maxWidth": width, "maxHeight": height, "everyNthFrame": 1},
+        )
+        print(f"✓ Video recording started: {self.output_path}")
+
+    def _write_previous_frame(self, now):
+        # Screencast only emits on change, so hold the previous frame for the elapsed time.
+        if self.last_frame is None:
+            return
+        repeats = max(1, round((now - self.last_time) * VIDEO_FPS))
+        for _ in range(repeats):
+            self.process.stdin.write(self.last_frame)
+
+    def _on_frame(self, params):
+        try:
+            self.session.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+            now = time.monotonic()
+            self._write_previous_frame(now)
+            self.last_frame = base64.b64decode(params["data"])
+            self.last_time = now
+        except Exception:
+            pass
+
+    def stop(self):
+        try:
+            self.session.send("Page.stopScreencast")
+        except Exception:
+            pass
+        try:
+            self._write_previous_frame(time.monotonic())
+            self.process.stdin.close()
+            self.process.wait(timeout=60)
+            print(f"✓ Video saved: {self.output_path}")
+        except Exception as exc:
+            print(f"⚠ Could not finalize video: {exc}")
+
+
+def start_video_recording(page):
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        print("⚠ Video recording unavailable (run: python -m playwright install ffmpeg); continuing without video")
+        return None
+    recorder = ScreencastRecorder(page, VIDEOS_DIR / f"{SCRIPT_NAME}_{RUN_STAMP}.webm", ffmpeg_path)
+    try:
+        recorder.start()
+        return recorder
+    except Exception as exc:
+        print(f"⚠ Could not start video recording: {exc}")
+        return None
 
 
 def save_storage_state(context):
@@ -256,23 +422,30 @@ def save_storage_state(context):
         print(f"✗ Failed to save session cookies/storage: {exc}")
 
 
-def open_profiles_page(page):
-    """Navigate to PayDirect Admin and report whether the Profiles table is visible."""
+def is_profiles_visible(page, timeout_ms=20_000):
     try:
-        page.goto(PAYDIRECT_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightError as exc:
-        print(f"⚠ PayDirect navigation issue: {exc}")
-    try:
-        page.wait_for_selector("#Profiles", state="visible", timeout=20_000)
+        page.wait_for_selector("#Profiles", state="visible", timeout=timeout_ms)
         return True
     except PlaywrightTimeoutError:
         return False
 
 
+def open_profiles_page(page):
+    """Navigate to PayDirect Admin and report whether the Profiles table is visible."""
+    try:
+        page.goto(PAYDIRECT_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        print(f"⚠ PayDirect navigation issue: {exc}".splitlines()[0])
+    return is_profiles_visible(page)
+
+
 def wait_for_login(page, context):
-    """Open PayDirect Admin and wait for manual login until the Profiles table shows."""
-    print(f"\n▶ Opening PayDirect Admin: {PAYDIRECT_URL}")
-    if open_profiles_page(page):
+    """Wait for the user to log in manually until the Profiles table shows."""
+    print(f"\n▶ Checking PayDirect Admin login: {PAYDIRECT_URL}")
+    # Chrome was opened on PayDirect already; don't navigate away from a pending login prompt.
+    if not page.url.lower().startswith(PAYDIRECT_URL.lower()):
+        open_profiles_page(page)
+    if is_profiles_visible(page):
         print("✓ PayDirect profile list visible (login already active)")
     else:
         print("\n" + "=" * 60)
@@ -283,7 +456,7 @@ def wait_for_login(page, context):
         print("=" * 60)
         while True:
             prompt_input("\n▶ Press Enter after PayDirect authentication is completed...")
-            if open_profiles_page(page):
+            if is_profiles_visible(page, timeout_ms=3_000) or open_profiles_page(page):
                 print("✓ PayDirect login confirmed")
                 break
             print("✗ PayDirect login not ready: Profiles table did not open/show.")
@@ -463,7 +636,8 @@ def test_site(context, page, row):
     env_select.select_option(label=TARGET_ENVIRONMENT)
     print(f"✓ SelectedPostEnvironment set to {env_select.input_value()}")
 
-    submit_button = page.locator("input.testPageButton[type='submit']").first
+    # The page holds a hidden Submit (other POST type) before the visible one.
+    submit_button = page.locator("input.testPageButton[type='submit']:visible").first
     submit_button.wait_for(state="visible", timeout=30_000)
 
     pages_before = list(context.pages)
@@ -683,23 +857,6 @@ def write_reports(reason="update"):
         print(f"✗ Failed to write HTML report: {exc}")
 
 
-def finalize_videos(pages):
-    """Rename recorded videos to run-stamped names after the context is closed."""
-    for index, page in enumerate(pages, start=1):
-        try:
-            if not page.video:
-                continue
-            source = Path(page.video.path())
-            if not source.exists():
-                continue
-            suffix = "" if index == 1 else f"_{index}"
-            target = VIDEOS_DIR / f"{SCRIPT_NAME}_{RUN_STAMP}{suffix}{source.suffix}"
-            source.replace(target)
-            print(f"✓ Video saved: {target}")
-        except Exception as exc:
-            print(f"⚠ Could not finalize video: {exc}")
-
-
 def display_summary():
     failures = [result for result in RESULTS if result["Result"] != "Success"]
     print("\n" + "=" * 60)
@@ -727,12 +884,14 @@ def main():
         return
 
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, browser_choice)
-        context = create_context(browser, record_video)
-        context.set_default_timeout(NAV_TIMEOUT_MS)
-        tracked_pages = []
-        context.on("page", tracked_pages.append)
-        page = context.new_page()
+        try:
+            browser, browser_process = launch_browser(playwright, browser_choice)
+        except Exception as exc:
+            print(f"✗ Fatal error: {exc}")
+            flush_log()
+            return
+        context, page = get_session(browser)
+        recorder = start_video_recording(page) if record_video else None
 
         try:
             wait_for_login(page, context)
@@ -751,10 +910,9 @@ def main():
         finally:
             write_reports(reason="finalized")
             save_storage_state(context)
-            context.close()
-            if record_video:
-                finalize_videos(tracked_pages)
-            browser.close()
+            if recorder:
+                recorder.stop()
+            close_browser(browser, browser_process)
             flush_log()
 
 
