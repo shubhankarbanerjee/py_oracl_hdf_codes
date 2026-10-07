@@ -742,8 +742,11 @@ def render_url_cell(url, error_text=""):
 
 
 def sort_key(record):
-    key = record.get("key", "")
-    return (0, int(key), "") if key.isdigit() else (1, 0, key)
+    return (
+        (record.get("PROD URL") or "").lower(),
+        (record.get("Merchant Site Name") or "").lower(),
+        record.get("key", ""),
+    )
 
 
 def write_html_report(records):
