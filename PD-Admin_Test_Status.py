@@ -753,11 +753,12 @@ def write_html_report(records):
         result = record.get("Result", "")
         error_text = "" if result == "Success" else result
         name_html = html.escape(record.get("Name", ""))
+        name_title = name_html
         if record.get("Edit URL"):
             name_html = f'<a href="{html.escape(record["Edit URL"])}" target="_blank">{name_html}</a>'
         rows_html.append(
             f"        <tr{row_class}>\n"
-            f"            <td>{name_html}</td>\n"
+            f'            <td class="name" title="{name_title}">{name_html}</td>\n'
             f'            <td class="nowrap">{html.escape(record.get("Merchant Code", ""))}</td>\n'
             f'            <td>{html.escape(record.get("Merchant Site Name", ""))}</td>\n'
             f'            <td>{html.escape(record.get("Type", ""))}</td>\n'
@@ -793,6 +794,7 @@ def write_html_report(records):
         tr.oddRow {{ background: #f2f6fb; }}
         td.nowrap {{ white-space: nowrap; }}
         td.url {{ max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+        td.name {{ max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
         td.error, td.error a {{ color: #c00; }}
     </style>
 </head>
