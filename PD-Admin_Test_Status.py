@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 import html
 import json
+import msvcrt
 import os
 from pathlib import Path
 import re
@@ -34,6 +35,7 @@ HTML_REPORT_PATH = BASE_DIR / f"{SCRIPT_NAME}.HTML"
 CSV_PATH = BASE_DIR / f"{SCRIPT_NAME}_{RUN_STAMP}.csv"
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
 VIDEOS_DIR = BASE_DIR / "videos" / SCRIPT_NAME
+STOP_FILE_PATH = BASE_DIR / f"{SCRIPT_NAME}.STOP"
 
 CACHE_MIN_SITES = 30
 SAVE_EVERY_SITES = 10
@@ -761,11 +763,25 @@ def process_batch(context, batch, start_index, total):
                         pass
 
 
+def stop_requested():
+    """True when Q was pressed in this console or the STOP file exists."""
+    while msvcrt.kbhit():
+        if msvcrt.getwch().lower() == "q":
+            return True
+    return STOP_FILE_PATH.exists()
+
+
 def test_sites(context, page, rows):
     """Test every resolved row in batches of PARALLEL_SITES, saving reports periodically."""
     total = len(rows)
+    STOP_FILE_PATH.unlink(missing_ok=True)
     print(f"▶ Processing {total} site(s), {PARALLEL_SITES} at a time")
+    print(f"  To stop gracefully: press Q in this terminal, or create the file {STOP_FILE_PATH.name}")
     for start in range(0, total, PARALLEL_SITES):
+        if stop_requested():
+            print(f"⚠ Stop requested: ending after {start}/{total} site(s); saving reports...")
+            STOP_FILE_PATH.unlink(missing_ok=True)
+            break
         batch = rows[start:start + PARALLEL_SITES]
         print("\n" + "-" * 60)
         try:
