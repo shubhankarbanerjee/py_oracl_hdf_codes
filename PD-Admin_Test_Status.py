@@ -19,7 +19,8 @@ SCRIPT_NAME = "PD-Admin_Test_Status"
 BASE_DIR = Path(__file__).resolve().parent
 PAYDIRECT_URL = "http://p5zlgintc01:16020/PayDirect/"
 MULTIPAY_WEB_URL = "https://app.multipayweb.cus.prod.comm.fisfedcloud.com/"
-MULTIPAY_FORM_TIMEOUT_MS = 20_000
+MULTIPAY_FORM_TIMEOUT_MS = 4_000
+MULTIPAY_PARALLEL_TABS = 5
 PAYDIRECT_STYLE_URLS = [
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/jquery-ui.min.css",
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/smoothness/jquery.ui.theme.css",
@@ -681,45 +682,72 @@ def test_site(context, page, row):
     return build_result(row, prod_url=prod_url, result="No redirect detected", screenshot=screenshot)
 
 
-def check_multipay_web(page, row):
-    """Open the MultiPay Web page for the site; OK when the checkout form renders."""
-    site_name = (row.get("site_name") or "").strip()
-    if not site_name:
-        return "NO", "", ""
-    url = MULTIPAY_WEB_URL + site_name
-    print(f"▶ Checking MultiPay Web page: {url}")
-    status = "NO"
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        page.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=MULTIPAY_FORM_TIMEOUT_MS)
-        status = "OK"
-    except PlaywrightError as exc:
-        print(f"  MultiPay checkout form not found: {exc}".splitlines()[0])
-    try:
-        page.wait_for_load_state("networkidle", timeout=5_000)
-    except PlaywrightTimeoutError:
-        pass
+def check_multipay_web_batch(context, results):
+    """Open up to MULTIPAY_PARALLEL_TABS MultiPay Web pages at once; OK when the checkout form renders."""
+    opened = []
+    for result in results:
+        site_name = (result.get("Merchant Site Name") or "").strip()
+        if not site_name:
+            result.update({"Multipay?": "NO", "Multipay URL": "", "MP Screenshot": ""})
+            continue
+        url = MULTIPAY_WEB_URL + site_name
+        print(f"▶ Opening MultiPay Web page: {url}")
+        tab = context.new_page()
+        try:
+            # Only wait for the response to start so all tabs load side by side.
+            tab.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_MS)
+        except PlaywrightError as exc:
+            print(f"  MultiPay navigation issue for {site_name}: {exc}".splitlines()[0])
+        opened.append((result, site_name, url, tab))
 
-    screenshot = ""
-    try:
-        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
-        page.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
-        print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
-    except Exception as exc:
-        print(f"⚠ MultiPay screenshot failed: {exc}")
+    for result, site_name, url, tab in opened:
+        status = "NO"
         screenshot = ""
+        try:
+            tab.bring_to_front()
+            tab.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=MULTIPAY_FORM_TIMEOUT_MS)
+            status = "OK"
+        except PlaywrightError:
+            pass
+        try:
+            SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+            screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
+            tab.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
+            print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
+        except Exception as exc:
+            print(f"⚠ MultiPay screenshot failed for {site_name}: {exc}")
+            screenshot = ""
+        try:
+            tab.close()
+        except Exception:
+            pass
 
-    if status == "OK":
-        print(f"✓ MultiPay Web OK for {site_name}")
-    else:
-        print(f"✗ MultiPay Web NO for {site_name}")
-    return status, url, screenshot
+        if status == "OK":
+            print(f"✓ MultiPay Web OK for {site_name}")
+        else:
+            print(f"✗ MultiPay Web NO for {site_name} (checkout form not shown)")
+        result.update({"Multipay?": status, "Multipay URL": url, "MP Screenshot": screenshot})
+
+
+def check_multipay_web_all(context, page, results):
+    """Run the MultiPay Web check for this run's results in batches of parallel tabs."""
+    print("\n" + "-" * 60)
+    print(f"▶ Checking MultiPay Web pages for {len(results)} site(s), {MULTIPAY_PARALLEL_TABS} tab(s) at a time")
+    for start in range(0, len(results), MULTIPAY_PARALLEL_TABS):
+        try:
+            check_multipay_web_batch(context, results[start:start + MULTIPAY_PARALLEL_TABS])
+        except Exception as exc:
+            print(f"✗ MultiPay Web batch failed: {exc}")
+        flush_log()
+    page.bring_to_front()
+    ok_count = sum(1 for result in results if result.get("Multipay?") == "OK")
+    print(f"✓ MultiPay Web check complete: {ok_count} OK, {len(results) - ok_count} NO")
 
 
 def test_sites(context, page, rows):
     """Test every resolved row, saving reports periodically."""
     total = len(rows)
+    run_results = []
     for index, row in enumerate(rows, start=1):
         print("\n" + "-" * 60)
         print(f"▶ Testing site {index}/{total}: {row['name']} | {row['merchant_code']} | {row['site_name']}")
@@ -738,18 +766,14 @@ def test_sites(context, page, rows):
             except Exception:
                 pass
             result = build_result(row, prod_url=current_url, result=f"Error: {exc}".splitlines()[0], screenshot=screenshot)
-
-        try:
-            mp_status, mp_url, mp_screenshot = check_multipay_web(page, row)
-        except Exception as exc:
-            print(f"✗ MultiPay Web check failed for {row['name']}: {exc}")
-            mp_status, mp_url, mp_screenshot = "NO", "", ""
-        result.update({"Multipay?": mp_status, "Multipay URL": mp_url, "MP Screenshot": mp_screenshot})
         RESULTS.append(result)
+        run_results.append(result)
 
         if index % SAVE_EVERY_SITES == 0:
             write_reports(reason=f"updated after {index}/{total} site(s)")
         flush_log()
+
+    check_multipay_web_all(context, page, run_results)
 
 
 # ---------------------------------------------------------------------------
