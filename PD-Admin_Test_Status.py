@@ -18,6 +18,8 @@ from playwright.sync_api import sync_playwright
 SCRIPT_NAME = "PD-Admin_Test_Status"
 BASE_DIR = Path(__file__).resolve().parent
 PAYDIRECT_URL = "http://p5zlgintc01:16020/PayDirect/"
+MULTIPAY_WEB_URL = "https://app.multipayweb.cus.prod.comm.fisfedcloud.com/"
+MULTIPAY_FORM_TIMEOUT_MS = 20_000
 PAYDIRECT_STYLE_URLS = [
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/jquery-ui.min.css",
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/smoothness/jquery.ui.theme.css",
@@ -67,6 +69,9 @@ CSV_COLUMNS = [
     "PROD URL",
     "Result",
     "Screenshot",
+    "Multipay?",
+    "Multipay URL",
+    "MP Screenshot",
     "Tested At",
 ]
 
@@ -563,6 +568,9 @@ def build_result(row, prod_url="", result="", screenshot=""):
         "PROD URL": prod_url,
         "Result": result,
         "Screenshot": screenshot,
+        "Multipay?": "",
+        "Multipay URL": "",
+        "MP Screenshot": "",
         "Tested At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -673,6 +681,42 @@ def test_site(context, page, row):
     return build_result(row, prod_url=prod_url, result="No redirect detected", screenshot=screenshot)
 
 
+def check_multipay_web(page, row):
+    """Open the MultiPay Web page for the site; OK when the checkout form renders."""
+    site_name = (row.get("site_name") or "").strip()
+    if not site_name:
+        return "NO", "", ""
+    url = MULTIPAY_WEB_URL + site_name
+    print(f"▶ Checking MultiPay Web page: {url}")
+    status = "NO"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        page.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=MULTIPAY_FORM_TIMEOUT_MS)
+        status = "OK"
+    except PlaywrightError as exc:
+        print(f"  MultiPay checkout form not found: {exc}".splitlines()[0])
+    try:
+        page.wait_for_load_state("networkidle", timeout=5_000)
+    except PlaywrightTimeoutError:
+        pass
+
+    screenshot = ""
+    try:
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
+        page.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
+        print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
+    except Exception as exc:
+        print(f"⚠ MultiPay screenshot failed: {exc}")
+        screenshot = ""
+
+    if status == "OK":
+        print(f"✓ MultiPay Web OK for {site_name}")
+    else:
+        print(f"✗ MultiPay Web NO for {site_name}")
+    return status, url, screenshot
+
+
 def test_sites(context, page, rows):
     """Test every resolved row, saving reports periodically."""
     total = len(rows)
@@ -694,6 +738,13 @@ def test_sites(context, page, rows):
             except Exception:
                 pass
             result = build_result(row, prod_url=current_url, result=f"Error: {exc}".splitlines()[0], screenshot=screenshot)
+
+        try:
+            mp_status, mp_url, mp_screenshot = check_multipay_web(page, row)
+        except Exception as exc:
+            print(f"✗ MultiPay Web check failed for {row['name']}: {exc}")
+            mp_status, mp_url, mp_screenshot = "NO", "", ""
+        result.update({"Multipay?": mp_status, "Multipay URL": mp_url, "MP Screenshot": mp_screenshot})
         RESULTS.append(result)
 
         if index % SAVE_EVERY_SITES == 0:
@@ -741,6 +792,16 @@ def render_url_cell(url, error_text=""):
     )
 
 
+def render_multipay_cell(status, url):
+    if not status:
+        return "<td></td>"
+    css_class = "mp-ok" if status == "OK" else "mp-no"
+    label = html.escape(status)
+    if url:
+        label = f'<a href="{html.escape(url)}" target="_blank" title="{html.escape(url)}">{label}</a>'
+    return f'<td class="{css_class}">{label}</td>'
+
+
 def sort_key(record):
     return (
         (record.get("PROD URL") or "").lower(),
@@ -768,6 +829,7 @@ def write_html_report(records):
             f'            <td>{html.escape(record.get("Status", ""))}</td>\n'
             f"            {render_url_cell(record.get('Test URL', ''))}\n"
             f"            {render_url_cell(record.get('PROD URL', ''), error_text)}\n"
+            f"            {render_multipay_cell(record.get('Multipay?', ''), record.get('Multipay URL', ''))}\n"
             f'            <td class="nowrap">{html.escape(record.get("Last Updated", ""))}</td>\n'
             f"        </tr>"
         )
@@ -799,6 +861,8 @@ def write_html_report(records):
         td.url {{ max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
         td.name {{ max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
         td.error, td.error a {{ color: #c00; }}
+        td.mp-ok, td.mp-ok a {{ color: #1a7f37; font-weight: bold; }}
+        td.mp-no, td.mp-no a {{ color: #c00; font-weight: bold; }}
     </style>
 </head>
 <body>
@@ -823,6 +887,7 @@ def write_html_report(records):
         <th>Status</th>
         <th>Test URL</th>
         <th>PROD URL</th>
+        <th>Multipay?</th>
         <th>Last Updated</th>
     </tr>
 {chr(10).join(rows_html)}
@@ -853,7 +918,7 @@ def write_reports(reason="update"):
         for result in RESULTS:
             if not result["Test URL"] and not result["Merchant Code"]:
                 continue
-            record = {key: value for key, value in result.items() if key not in {"Screenshot", "Tested At"}}
+            record = {key: value for key, value in result.items() if key not in {"Screenshot", "MP Screenshot", "Tested At"}}
             record["Last Updated"] = result["Tested At"]
             records[result["key"]] = record
         html_path = write_html_report(records)
