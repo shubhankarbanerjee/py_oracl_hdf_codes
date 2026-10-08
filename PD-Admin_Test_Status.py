@@ -19,8 +19,9 @@ SCRIPT_NAME = "PD-Admin_Test_Status"
 BASE_DIR = Path(__file__).resolve().parent
 PAYDIRECT_URL = "http://p5zlgintc01:16020/PayDirect/"
 MULTIPAY_WEB_URL = "https://app.multipayweb.cus.prod.comm.fisfedcloud.com/"
-MULTIPAY_FORM_TIMEOUT_MS = 4_000
-MULTIPAY_PARALLEL_TABS = 5
+PARALLEL_SITES = 5
+PAGE_READY_TIMEOUT_MS = 4_000
+REDIRECT_TIMEOUT_MS = 8_000
 PAYDIRECT_STYLE_URLS = [
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/jquery-ui.min.css",
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/smoothness/jquery.ui.theme.css",
@@ -38,8 +39,6 @@ CACHE_MIN_SITES = 30
 SAVE_EVERY_SITES = 10
 TARGET_ENVIRONMENT = "PROD"
 NAV_TIMEOUT_MS = 60_000
-REDIRECT_TIMEOUT_S = 60
-SETTLE_STABLE_S = 3
 VIDEO_SIZE = (1280, 720)
 VIDEO_FPS = 25
 BROWSER_PROFILE_ROOT = BASE_DIR / ".pdadmin_browser_profile"
@@ -120,34 +119,31 @@ RESULTS = []
 
 
 # ---------------------------------------------------------------------------
-# Logging (same format as PayDirAdminMig2Mulpay.py, newest entries on top)
+# Logging: <DDMMYYYY HHmmSS> | <ERROR/INFO/WARN> | message (newest entries on top in the file)
 # ---------------------------------------------------------------------------
 def get_log_status(message):
     """Infer a log status from the console message prefix/content."""
-    stripped_message = message.strip()
-    if not stripped_message:
-        return None
-    if stripped_message.startswith("✗") or "fatal error" in stripped_message.lower():
+    if message.startswith("✗") or "fatal error" in message.lower():
         return "ERROR"
-    if stripped_message.startswith("⚠"):
+    if message.startswith("⚠"):
         return "WARN"
-    if stripped_message.startswith("▶"):
-        return "STARTED"
-    if stripped_message.startswith("✓"):
-        return "DONE"
     return "INFO"
 
 
 def print(*args, sep=" ", end="\n", file=None, flush=False):
-    """Mirror console output to the log buffer using the requested format."""
+    """Print and log every non-blank line as '<DDMMYYYY HHmmSS> | <STATUS> | message'."""
     message = sep.join(str(arg) for arg in args)
-    timestamp = datetime.now().strftime("%Y-%m-%d - %H:%M:%S")
-    for line in message.splitlines():
+    timestamp = datetime.now().strftime("%d%m%Y %H%M%S")
+    output_lines = []
+    for line in message.split("\n"):
         line = line.strip()
-        status = get_log_status(line)
-        if status:
-            LOG_BUFFER.append(f"{timestamp} - {status} - {line}")
-    builtins.print(*args, sep=sep, end=end, file=file, flush=flush)
+        if not line:
+            output_lines.append("")
+            continue
+        formatted = f"{timestamp} | {get_log_status(line)} | {line}"
+        LOG_BUFFER.append(formatted)
+        output_lines.append(formatted)
+    builtins.print("\n".join(output_lines), end=end, file=file, flush=flush)
 
 
 def flush_log():
@@ -595,185 +591,181 @@ def take_screenshot(target_page, row, phase):
     return file_name
 
 
-def wait_for_redirect(context, page, pages_before, url_before, navigations):
-    """Wait for the submit to navigate the page or open a new tab; return the target page."""
-    deadline = time.monotonic() + REDIRECT_TIMEOUT_S
-    while time.monotonic() < deadline:
-        new_pages = [p for p in context.pages if p not in pages_before]
-        if new_pages:
-            return new_pages[-1], True
-        if navigations or page.url != url_before:
-            return page, True
-        page.wait_for_timeout(250)
-    return page, False
+def short_error(exc):
+    text = str(exc).strip()
+    return text.splitlines()[0] if text else exc.__class__.__name__
 
 
-def wait_for_page_settle(target_page):
-    """Wait until the page is loaded and its URL stops changing (handles redirect chains)."""
-    deadline = time.monotonic() + REDIRECT_TIMEOUT_S
-    last_url = target_page.url
-    stable_since = time.monotonic()
-    while time.monotonic() < deadline:
-        try:
-            target_page.wait_for_load_state("load", timeout=5_000)
-        except PlaywrightTimeoutError:
-            pass
-        target_page.wait_for_timeout(500)
-        if target_page.url != last_url:
-            print(f"  Redirected to: {target_page.url}")
-            last_url = target_page.url
-            stable_since = time.monotonic()
-        elif time.monotonic() - stable_since >= SETTLE_STABLE_S:
-            break
+def open_tab(context, url, label):
+    """Open url in a new tab without waiting for it to finish loading."""
+    tab = context.new_page()
     try:
-        target_page.wait_for_load_state("networkidle", timeout=10_000)
-    except PlaywrightTimeoutError:
-        print("  Network did not go idle within 10s; continuing")
+        # Only wait for the response to start so all tabs of a batch load side by side.
+        tab.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        print(f"⚠ {label} navigation issue: {short_error(exc)}")
+    return tab
 
 
-def test_site(context, page, row):
-    """Open the site's Test page, post to PROD and capture the resulting page."""
-    test_url = row.get("test_url")
-    if not test_url:
-        raise RuntimeError("Test link not found in the PayDirect row")
-
-    print(f"▶ Opening Test page: {test_url}")
-    page.goto(test_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-
-    env_select = page.locator("#SelectedPostEnvironment")
-    env_select.wait_for(state="visible", timeout=30_000)
+def submit_test_page(tab):
+    """Select PROD and click the visible Submit Form button; return the URL before submit."""
+    tab.bring_to_front()
+    env_select = tab.locator("#SelectedPostEnvironment")
+    env_select.wait_for(state="visible", timeout=PAGE_READY_TIMEOUT_MS)
     env_select.select_option(label=TARGET_ENVIRONMENT)
-    print(f"✓ SelectedPostEnvironment set to {env_select.input_value()}")
-
     # The page holds a hidden Submit (other POST type) before the visible one.
-    submit_button = page.locator("input.testPageButton[type='submit']:visible").first
-    submit_button.wait_for(state="visible", timeout=30_000)
+    submit_button = tab.locator("input.testPageButton[type='submit']:visible").first
+    submit_button.wait_for(state="visible", timeout=PAGE_READY_TIMEOUT_MS)
+    url_before = tab.url
+    submit_button.click(no_wait_after=True)
+    return url_before
 
-    pages_before = list(context.pages)
-    url_before = page.url
-    navigations = []
 
-    def on_frame_navigated(frame):
-        if frame == page.main_frame:
-            navigations.append(frame.url)
-
-    page.on("framenavigated", on_frame_navigated)
+def collect_prod_result(tab, row, url_before):
+    """Wait for the PROD redirect on a submitted tab, screenshot it and build the result."""
+    tab.bring_to_front()
     try:
-        print("▶ Clicking first 'Submit Form' button...")
-        submit_button.click(no_wait_after=True)
-        target_page, redirected = wait_for_redirect(context, page, pages_before, url_before, navigations)
-    finally:
-        page.remove_listener("framenavigated", on_frame_navigated)
+        tab.wait_for_url(lambda url: url != url_before, timeout=REDIRECT_TIMEOUT_MS)
+        redirected = True
+    except PlaywrightTimeoutError:
+        redirected = False
+    try:
+        tab.wait_for_load_state("load", timeout=PAGE_READY_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        pass
 
-    if target_page is not page:
-        print("  Submit opened a new tab; following it")
-    wait_for_page_settle(target_page)
-
-    prod_url = target_page.url
-    screenshot = take_screenshot(target_page, row, TARGET_ENVIRONMENT)
-    if target_page is not page:
-        target_page.close()
-
+    prod_url = tab.url
+    screenshot = take_screenshot(tab, row, TARGET_ENVIRONMENT)
     if redirected:
-        print(f"✓ PROD page reached: {prod_url}")
+        print(f"✓ PROD page reached for {row['site_name']}: {prod_url}")
         return build_result(row, prod_url=prod_url, result="Success", screenshot=screenshot)
-
-    print(f"✗ No redirect detected within {REDIRECT_TIMEOUT_S}s; current URL: {prod_url}")
+    print(f"✗ No PROD redirect within {REDIRECT_TIMEOUT_MS // 1000}s for {row['site_name']}; URL: {prod_url}")
     return build_result(row, prod_url=prod_url, result="No redirect detected", screenshot=screenshot)
 
 
-def check_multipay_web_batch(context, results):
-    """Open up to MULTIPAY_PARALLEL_TABS MultiPay Web pages at once; OK when the checkout form renders."""
-    opened = []
-    for result in results:
-        site_name = (result.get("Merchant Site Name") or "").strip()
-        if not site_name:
-            result.update({"Multipay?": "NO", "Multipay URL": "", "MP Screenshot": ""})
-            continue
-        url = MULTIPAY_WEB_URL + site_name
-        print(f"▶ Opening MultiPay Web page: {url}")
-        tab = context.new_page()
-        try:
-            # Only wait for the response to start so all tabs load side by side.
-            tab.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_MS)
-        except PlaywrightError as exc:
-            print(f"  MultiPay navigation issue for {site_name}: {exc}".splitlines()[0])
-        opened.append((result, site_name, url, tab))
+def collect_multipay_result(tab, site_name):
+    """Return ('OK'|'NO', screenshot) depending on whether the MultiPay checkout form shows."""
+    tab.bring_to_front()
+    status = "NO"
+    try:
+        tab.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=PAGE_READY_TIMEOUT_MS)
+        status = "OK"
+    except PlaywrightError:
+        pass
 
-    for result, site_name, url, tab in opened:
-        status = "NO"
+    screenshot = ""
+    try:
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
+        tab.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
+        print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
+    except Exception as exc:
+        print(f"⚠ MultiPay screenshot failed for {site_name}: {short_error(exc)}")
         screenshot = ""
-        try:
-            tab.bring_to_front()
-            tab.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=MULTIPAY_FORM_TIMEOUT_MS)
-            status = "OK"
-        except PlaywrightError:
-            pass
-        try:
-            SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-            screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
-            tab.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
-            print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
-        except Exception as exc:
-            print(f"⚠ MultiPay screenshot failed for {site_name}: {exc}")
-            screenshot = ""
-        try:
-            tab.close()
-        except Exception:
-            pass
 
-        if status == "OK":
-            print(f"✓ MultiPay Web OK for {site_name}")
-        else:
-            print(f"✗ MultiPay Web NO for {site_name} (checkout form not shown)")
-        result.update({"Multipay?": status, "Multipay URL": url, "MP Screenshot": screenshot})
+    if status == "OK":
+        print(f"✓ MultiPay Web OK for {site_name}")
+    else:
+        print(f"✗ MultiPay Web NO for {site_name} (checkout form not shown)")
+    return status, screenshot
 
 
-def check_multipay_web_all(context, page, results):
-    """Run the MultiPay Web check for this run's results in batches of parallel tabs."""
-    print("\n" + "-" * 60)
-    print(f"▶ Checking MultiPay Web pages for {len(results)} site(s), {MULTIPAY_PARALLEL_TABS} tab(s) at a time")
-    for start in range(0, len(results), MULTIPAY_PARALLEL_TABS):
-        try:
-            check_multipay_web_batch(context, results[start:start + MULTIPAY_PARALLEL_TABS])
-        except Exception as exc:
-            print(f"✗ MultiPay Web batch failed: {exc}")
-        flush_log()
-    page.bring_to_front()
-    ok_count = sum(1 for result in results if result.get("Multipay?") == "OK")
-    print(f"✓ MultiPay Web check complete: {ok_count} OK, {len(results) - ok_count} NO")
+def process_batch(context, batch, start_index, total):
+    """Open Test + MultiPay tabs for a batch of sites together, then submit and collect each."""
+    entries = []
+    try:
+        for offset, row in enumerate(batch):
+            site_name = (row.get("site_name") or "").strip()
+            entry = {
+                "row": row,
+                "site_name": site_name,
+                "test_tab": None,
+                "mp_tab": None,
+                "mp_url": MULTIPAY_WEB_URL + site_name if site_name else "",
+                "url_before": None,
+                "error": None,
+            }
+            entries.append(entry)
+            print(f"▶ Testing site {start_index + offset}/{total}: {row['name']} | {row['merchant_code']} | {site_name}")
+            if row.get("test_url"):
+                print(f"▶ Opening Test page: {row['test_url']}")
+                entry["test_tab"] = open_tab(context, row["test_url"], "Test page")
+            else:
+                entry["error"] = "Test link not found in the PayDirect row"
+            if entry["mp_url"]:
+                print(f"▶ Opening MultiPay Web page: {entry['mp_url']}")
+                entry["mp_tab"] = open_tab(context, entry["mp_url"], "MultiPay Web")
+
+        for entry in entries:
+            if entry["test_tab"] and not entry["error"]:
+                try:
+                    entry["url_before"] = submit_test_page(entry["test_tab"])
+                    print(f"✓ PROD selected and Submit clicked for {entry['site_name']}")
+                except PlaywrightError as exc:
+                    entry["error"] = short_error(exc)
+
+        results = []
+        for entry in entries:
+            row = entry["row"]
+            tab = entry["test_tab"]
+            if entry["error"]:
+                print(f"✗ Test failed for {row['name']}: {entry['error']}")
+                screenshot, current_url = "", ""
+                if tab:
+                    try:
+                        current_url = tab.url
+                        screenshot = take_screenshot(tab, row, "ERROR")
+                    except Exception:
+                        pass
+                result = build_result(row, prod_url=current_url, result=f"Error: {entry['error']}", screenshot=screenshot)
+            else:
+                try:
+                    result = collect_prod_result(tab, row, entry["url_before"])
+                except Exception as exc:
+                    print(f"✗ Test failed for {row['name']}: {short_error(exc)}")
+                    result = build_result(row, prod_url=tab.url, result=f"Error: {short_error(exc)}")
+
+            mp_status, mp_screenshot = "NO", ""
+            if entry["mp_tab"]:
+                try:
+                    mp_status, mp_screenshot = collect_multipay_result(entry["mp_tab"], entry["site_name"])
+                except Exception as exc:
+                    print(f"✗ MultiPay Web check failed for {entry['site_name']}: {short_error(exc)}")
+            result.update({"Multipay?": mp_status, "Multipay URL": entry["mp_url"], "MP Screenshot": mp_screenshot})
+            results.append(result)
+        return results
+    finally:
+        for entry in entries:
+            for tab in (entry["test_tab"], entry["mp_tab"]):
+                if tab:
+                    try:
+                        tab.close()
+                    except Exception:
+                        pass
 
 
 def test_sites(context, page, rows):
-    """Test every resolved row, saving reports periodically."""
+    """Test every resolved row in batches of PARALLEL_SITES, saving reports periodically."""
     total = len(rows)
-    run_results = []
-    for index, row in enumerate(rows, start=1):
+    print(f"▶ Processing {total} site(s), {PARALLEL_SITES} at a time")
+    for start in range(0, total, PARALLEL_SITES):
+        batch = rows[start:start + PARALLEL_SITES]
         print("\n" + "-" * 60)
-        print(f"▶ Testing site {index}/{total}: {row['name']} | {row['merchant_code']} | {row['site_name']}")
         try:
-            result = test_site(context, page, row)
+            results = process_batch(context, batch, start + 1, total)
         except Exception as exc:
-            print(f"✗ Test failed for {row['name']}: {exc}")
-            screenshot = ""
-            try:
-                screenshot = take_screenshot(page, row, "ERROR")
-            except Exception:
-                pass
-            current_url = ""
-            try:
-                current_url = page.url
-            except Exception:
-                pass
-            result = build_result(row, prod_url=current_url, result=f"Error: {exc}".splitlines()[0], screenshot=screenshot)
-        RESULTS.append(result)
-        run_results.append(result)
+            print(f"✗ Batch starting at site {start + 1} failed: {short_error(exc)}")
+            results = [build_result(row, result=f"Error: {short_error(exc)}") for row in batch]
+        RESULTS.extend(results)
 
-        if index % SAVE_EVERY_SITES == 0:
-            write_reports(reason=f"updated after {index}/{total} site(s)")
+        done = start + len(batch)
+        if done % SAVE_EVERY_SITES == 0:
+            write_reports(reason=f"updated after {done}/{total} site(s)")
         flush_log()
 
-    check_multipay_web_all(context, page, run_results)
+    page.bring_to_front()
+    ok_count = sum(1 for result in RESULTS if result.get("Multipay?") == "OK")
+    print(f"✓ MultiPay Web: {ok_count} OK, {len(RESULTS) - ok_count} NO")
 
 
 # ---------------------------------------------------------------------------
@@ -1000,7 +992,7 @@ def main():
         except KeyboardInterrupt:
             print("✗ Run interrupted by user.")
         except Exception as exc:
-            print(f"✗ Fatal error: {exc}")
+            print(f"✗ Fatal error: {short_error(exc)}")
         finally:
             write_reports(reason="finalized")
             save_storage_state(context)
