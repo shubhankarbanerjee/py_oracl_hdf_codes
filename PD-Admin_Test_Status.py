@@ -120,6 +120,8 @@ PROFILE_ROWS_JS = """
 LOG_BUFFER = []
 PROFILE_CACHE = []
 RESULTS = []
+ALL_ASCENDING = "*"
+ALL_DESCENDING = "ALL"
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +203,7 @@ def get_browser_choice():
 
 
 def get_site_entries():
-    """Collect site entries (one per line). Returns None when ALL sites are requested."""
+    """Collect site entries (one per line), or ALL_ASCENDING / ALL_DESCENDING for every site."""
     print("\n" + "=" * 60)
     print("SITE LIST INPUT")
     print("=" * 60)
@@ -209,7 +211,7 @@ def get_site_entries():
     print("  - Full Name          e.g. 35EDM Hopatcong Borough Various Animal")
     print("  - Merchant Code      e.g. 35EDM-HOPAU-VARAN-W")
     print("  - Merchant Site Name e.g. PPNJ1912 (may match several rows)")
-    print("Enter * or ALL to test every site listed in PayDirect Admin.")
+    print("Enter * to test every site in ascending order, or ALL for descending (newest first).")
     print("Press Enter twice when done.")
     print("=" * 60)
 
@@ -227,9 +229,12 @@ def get_site_entries():
             continue
 
         blank_line_count = 0
-        if line == "*" or line.upper() == "ALL":
-            print("✓ ALL sites requested")
-            return None
+        if line == "*":
+            print("✓ * requested: all sites in ascending order")
+            return ALL_ASCENDING
+        if line.upper() == "ALL":
+            print("✓ ALL requested: all sites in descending order")
+            return ALL_DESCENDING
         lines.append(line)
 
     print(f"✓ {len(lines)} site entr{'y' if len(lines) == 1 else 'ies'} received:")
@@ -510,10 +515,14 @@ def find_profile_rows(page, term, use_cache):
 
 def resolve_rows_to_test(page, entries):
     """Resolve user entries (or ALL) to a de-duplicated list of profile rows."""
-    if entries is None:
+    if entries in (ALL_ASCENDING, ALL_DESCENDING):
         load_profile_cache(page)
-        print(f"✓ ALL mode: {len(PROFILE_CACHE)} site(s) will be tested")
-        return list(PROFILE_CACHE)
+        rows = sorted(PROFILE_CACHE, key=lambda row: int(get_row_key(row)) if get_row_key(row).isdigit() else 0)
+        if entries == ALL_DESCENDING:
+            rows.reverse()
+        order = "descending" if entries == ALL_DESCENDING else "ascending"
+        print(f"✓ All sites mode: {len(rows)} site(s) will be tested in {order} order")
+        return rows
 
     use_cache = len(entries) > CACHE_MIN_SITES
     if use_cache:
