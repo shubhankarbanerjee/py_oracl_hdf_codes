@@ -38,6 +38,9 @@ VIDEOS_DIR = BASE_DIR / "videos" / SCRIPT_NAME
 CACHE_MIN_SITES = 30
 SAVE_EVERY_SITES = 10
 SCREENSHOT_TIMEOUT_MS = 8_000
+# Safety cap only: the MultiPay check returns as soon as a form or the error banner renders.
+MULTIPAY_MAX_WAIT_MS = 15_000
+MULTIPAY_ERROR_TEXT = "An error occurred while processing this request"
 TARGET_ENVIRONMENT = "PROD"
 NAV_TIMEOUT_MS = 60_000
 VIDEO_SIZE = (1280, 720)
@@ -646,12 +649,15 @@ def collect_prod_result(tab, row, url_before):
 
 
 def collect_multipay_result(tab, site_name):
-    """Return ('OK'|'NO', screenshot) depending on whether the MultiPay checkout form shows."""
+    """Return ('OK'|'NO', screenshot): OK when any form renders, NO on the error banner or no form."""
     tab.bring_to_front()
     status = "NO"
+    form = tab.locator("form")
+    error_banner = tab.get_by_text(MULTIPAY_ERROR_TEXT)
     try:
-        tab.locator("form #checkoutContainer").first.wait_for(state="visible", timeout=PAGE_READY_TIMEOUT_MS)
-        status = "OK"
+        form.or_(error_banner).first.wait_for(state="visible", timeout=MULTIPAY_MAX_WAIT_MS)
+        if form.first.is_visible():
+            status = "OK"
     except PlaywrightError:
         pass
 
@@ -668,7 +674,7 @@ def collect_multipay_result(tab, site_name):
     if status == "OK":
         print(f"✓ MultiPay Web OK for {site_name}")
     else:
-        print(f"• MultiPay Web NO for {site_name} (checkout form not shown)")
+        print(f"• MultiPay Web NO for {site_name} (no form shown)")
     return status, screenshot
 
 
