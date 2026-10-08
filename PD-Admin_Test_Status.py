@@ -19,9 +19,9 @@ SCRIPT_NAME = "PD-Admin_Test_Status"
 BASE_DIR = Path(__file__).resolve().parent
 PAYDIRECT_URL = "http://p5zlgintc01:16020/PayDirect/"
 MULTIPAY_WEB_URL = "https://app.multipayweb.cus.prod.comm.fisfedcloud.com/"
-PARALLEL_SITES = 5
+PARALLEL_SITES = 8
 PAGE_READY_TIMEOUT_MS = 4_000
-REDIRECT_TIMEOUT_MS = 8_000
+REDIRECT_TIMEOUT_MS = 4_000
 PAYDIRECT_STYLE_URLS = [
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/jquery-ui.min.css",
     "http://p5zlgintc01:16020/PayDirect/Content/jquery-ui/smoothness/jquery.ui.theme.css",
@@ -37,6 +37,7 @@ VIDEOS_DIR = BASE_DIR / "videos" / SCRIPT_NAME
 
 CACHE_MIN_SITES = 30
 SAVE_EVERY_SITES = 10
+SCREENSHOT_TIMEOUT_MS = 8_000
 TARGET_ENVIRONMENT = "PROD"
 NAV_TIMEOUT_MS = 60_000
 VIDEO_SIZE = (1280, 720)
@@ -586,7 +587,8 @@ def take_screenshot(target_page, row, phase):
         f"{'' if phase == TARGET_ENVIRONMENT else '_' + phase}.png"
     )
     path = SCREENSHOTS_DIR / file_name
-    target_page.screenshot(path=str(path), full_page=True)
+    target_page.bring_to_front()
+    target_page.screenshot(path=str(path), full_page=True, timeout=SCREENSHOT_TIMEOUT_MS)
     print(f"✓ Screenshot saved: {path}")
     return file_name
 
@@ -657,7 +659,7 @@ def collect_multipay_result(tab, site_name):
     try:
         SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
         screenshot = f"MP_{safe_file_part(site_name)}_{datetime.now().strftime('%d%m%Y %H%M%S')}.png"
-        tab.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True)
+        tab.screenshot(path=str(SCREENSHOTS_DIR / screenshot), full_page=True, timeout=SCREENSHOT_TIMEOUT_MS)
         print(f"✓ Screenshot saved: {SCREENSHOTS_DIR / screenshot}")
     except Exception as exc:
         print(f"⚠ MultiPay screenshot failed for {site_name}: {short_error(exc)}")
@@ -666,7 +668,7 @@ def collect_multipay_result(tab, site_name):
     if status == "OK":
         print(f"✓ MultiPay Web OK for {site_name}")
     else:
-        print(f"✗ MultiPay Web NO for {site_name} (checkout form not shown)")
+        print(f"• MultiPay Web NO for {site_name} (checkout form not shown)")
     return status, screenshot
 
 
@@ -759,7 +761,8 @@ def test_sites(context, page, rows):
         RESULTS.extend(results)
 
         done = start + len(batch)
-        if done % SAVE_EVERY_SITES == 0:
+        # Save whenever a SAVE_EVERY_SITES boundary is crossed, whatever PARALLEL_SITES is.
+        if done // SAVE_EVERY_SITES > start // SAVE_EVERY_SITES:
             write_reports(reason=f"updated after {done}/{total} site(s)")
         flush_log()
 
