@@ -830,7 +830,7 @@ def load_html_records():
 
 def render_url_cell(url, error_text=""):
     if error_text and not url:
-        return f'<td class="error">{html.escape(error_text)}</td>'
+        return f'<td class="error" title="{html.escape(error_text)}">{html.escape(error_text)}</td>'
     if not url:
         return "<td></td>"
     display = re.sub(r"^https?://", "", url)
@@ -870,17 +870,21 @@ def write_html_report(records):
         name_title = name_html
         if record.get("Edit URL"):
             name_html = f'<a href="{html.escape(record["Edit URL"])}" target="_blank">{name_html}</a>'
+        def text_cell(field):
+            value = html.escape(record.get(field, ""))
+            return f'<td title="{value}">{value}</td>'
+
         rows_html.append(
             f"        <tr{row_class}>\n"
-            f'            <td class="name" title="{name_title}">{name_html}</td>\n'
-            f'            <td class="nowrap">{html.escape(record.get("Merchant Code", ""))}</td>\n'
-            f'            <td>{html.escape(record.get("Merchant Site Name", ""))}</td>\n'
-            f'            <td>{html.escape(record.get("Type", ""))}</td>\n'
-            f'            <td>{html.escape(record.get("Status", ""))}</td>\n'
+            f'            <td title="{name_title}">{name_html}</td>\n'
+            f"            {text_cell('Merchant Code')}\n"
+            f"            {text_cell('Merchant Site Name')}\n"
+            f"            {text_cell('Type')}\n"
+            f"            {text_cell('Status')}\n"
             f"            {render_url_cell(record.get('Test URL', ''))}\n"
             f"            {render_url_cell(record.get('PROD URL', ''), error_text)}\n"
             f"            {render_multipay_cell(record.get('Multipay?', ''), record.get('Multipay URL', ''))}\n"
-            f'            <td class="nowrap">{html.escape(record.get("Last Updated", ""))}</td>\n'
+            f"            {text_cell('Last Updated')}\n"
             f"        </tr>"
         )
 
@@ -903,13 +907,11 @@ def write_html_report(records):
         .header h2 {{ color: #dfe8f5; font-size: 12px; margin: 2px 0 0; }}
         .container {{ padding: 0 16px; }}
         .navbar {{ display: inline-block; margin-top: 6px; }}
-        table.edit_table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+        table.edit_table {{ border-collapse: collapse; width: 100%; margin-top: 12px; table-layout: fixed; }}
+        table.edit_table th, table.edit_table td {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         table.edit_table th {{ background: #e6e6e6; text-align: left; padding: 4px 6px; border: 1px solid #ccc; }}
         table.edit_table td {{ padding: 3px 6px; border: 1px solid #e0e0e0; vertical-align: top; }}
         tr.oddRow {{ background: #f2f6fb; }}
-        td.nowrap {{ white-space: nowrap; }}
-        td.url {{ max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-        td.name {{ max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
         td.error, td.error a {{ color: #c00; }}
         td.mp-ok, td.mp-ok a {{ color: #1a7f37; font-weight: bold; }}
         td.mp-no, td.mp-no a {{ color: #c00; font-weight: bold; }}
@@ -929,6 +931,11 @@ def write_html_report(records):
     </div>
     <div class="container">
 <table id="Profiles" class="edit_table">
+    <colgroup>
+        <col style="width: 22%"><col style="width: 13%"><col style="width: 12%"><col style="width: 7%">
+        <col style="width: 6%"><col style="width: 12%"><col style="width: 14%"><col style="width: 5%">
+        <col style="width: 9%">
+    </colgroup>
     <tbody><tr>
         <th>Name</th>
         <th>Merchant Code</th>
